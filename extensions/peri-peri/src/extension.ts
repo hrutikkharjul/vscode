@@ -207,10 +207,9 @@ Rules:
 - Use Windows cmd.exe commands (dir, type, mkdir, del) not Unix
 - Use RELATIVE paths (e.g. "notes-app/src/App.js") not absolute paths
 - NEVER put backslash-n in paths. Use forward slashes: notes-app/src/App.js
-- When the task is COMPLETE, output <done/> with NO actions block. Do NOT repeat successful actions.
 - If a tool call FAILS, read the error, diagnose the problem, and try a DIFFERENT approach. Do NOT retry the same command more than once.
-- If open_browser succeeds, the task is done. Output <done/> immediately.
-- For long-running commands (npm start, dev servers), background them: "start /B cmd" on Windows`;
+- For long-running commands (npm start, dev servers), background them: "start /B cmd" on Windows
+- You MUST output an <actions> block. Do NOT just describe what you will do. ACT.`;
 
 /**
  * Format tool results into a continuation message. Each call is stateless
@@ -223,12 +222,13 @@ function buildContinuationMessage(
 	originalTask: string,
 	allPriorResults: string[],
 ): string {
-	// Format latest results
+	// Format latest results — include full output so the model can see file
+	// contents from read_file and full error messages from failures.
 	const latestResults = results.map(r => {
 		const body = r.output.length > MAX_RESULT_BYTES_PER_TOOL
 			? `${r.output.slice(0, MAX_RESULT_BYTES_PER_TOOL)}\n…[truncated]`
 			: r.output;
-		return `- ${r.tool}: ${r.success ? 'success' : 'FAILED'} — ${body.split('\n')[0]}`;
+		return `<tool_result name="${r.tool}" success="${r.success}">\n${body}\n</tool_result>`;
 	});
 
 	// Build accumulated history of completed steps (capped)
@@ -243,10 +243,11 @@ function buildContinuationMessage(
 
 Original task: ${originalTask}
 
-Steps completed so far (${stepNumber}):
+Results from step ${stepNumber}:
 ${stepsBlock}
 
-Continue working. Output your next <actions> block with ALL remaining work:
+If the task is fully complete, output <done/> with no actions block.
+Otherwise, continue working — output your next <actions> block:
 
 <actions>`;
 }
@@ -349,8 +350,14 @@ async function runMultistepLoop(
 			}
 		}
 
-		// Explicit <done/> from the model — stop cleanly even if it also emitted actions.
+		// Explicit <done/> from the model — stop cleanly, UNLESS it's the very
+		// first iteration and no actions have been executed (model just greeted).
 		if (done && actions.length === 0) {
+			if (state.stepsSoFar === 0 && state.totalActionsRun === 0) {
+				// Model tried to bail without doing anything — nudge it
+				message = `You output <done/> without performing any actions. The task is NOT complete. You MUST use your tools to complete the task. Output an <actions> block now:\n\n<actions>`;
+				continue;
+			}
 			return { result: { stoppedReason: 'done', stepsSoFar: state.stepsSoFar, totalActionsRun: state.totalActionsRun }, nextContinuationMessage: message };
 		}
 
@@ -686,7 +693,7 @@ export function activate(context: vscode.ExtensionContext): void {
 ${historyBlock ? '\n' + historyBlock + '\n' : ''}${editorBlock ? '\n' + editorBlock + '\n' : ''}${fileContext ? '\n' + fileContext + '\n' : ''}
 Task: ${userRequest}
 
-Create ALL necessary files in a single <actions> block. Do not use create-react-app or any scaffolding tools — write the files directly.
+IMPORTANT: Do NOT greet the user. Do NOT ask questions. Do NOT output <done/>. Start working IMMEDIATELY by outputting an <actions> block. Write files directly — do not use scaffolding tools.
 
 <actions>`;
 
