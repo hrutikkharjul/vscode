@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Intrix Solutions. All rights reserved.
- *  Licensed under the MIT License.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
@@ -307,11 +307,13 @@ export async function executeAction(
 // --- Implementations ---
 
 function resolvePath(p: string): string {
-	if (path.isAbsolute(p)) {
-		return p;
+	// Sanitize: model sometimes outputs \n or \r in paths (e.g. \notes-app becomes newline+otes-app)
+	const sanitized = p.replace(/[\r\n]+/g, '').trim();
+	if (path.isAbsolute(sanitized)) {
+		return sanitized;
 	}
 	const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-	return path.join(root, p);
+	return path.join(root, sanitized);
 }
 
 async function execReadFile(args: Record<string, any>): Promise<ToolResult> {
@@ -448,8 +450,11 @@ async function execRunShell(
 	stream: vscode.ChatResponseStream,
 	token: vscode.CancellationToken | undefined,
 ): Promise<ToolResult> {
-	const cmd: string = typeof args.command === 'string' ? args.command : '';
-	if (!cmd.trim()) {
+	let cmd: string = typeof args.command === 'string' ? args.command : '';
+	// Fix path corruption: backslash + 'n'/'t'/'r' in paths gets parsed as escape sequences.
+	// Replace literal newlines/tabs that break commands (e.g. "cd peri-peri\notes-app" → newline)
+	cmd = cmd.replace(/\r?\n/g, ' && ').trim();
+	if (!cmd) {
 		return { tool: 'run_shell', success: false, output: 'Empty command.' };
 	}
 

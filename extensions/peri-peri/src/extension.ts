@@ -13,7 +13,7 @@ const PARTICIPANT_ID = 'intrix.peri-peri';
 
 // Debug output channel — visible via "Output" panel → "Peri Peri" in the dev host.
 let outputChannel: vscode.OutputChannel;
-const AGENT_CACHE_KEY = 'periPeri.agentCache.v1';
+const AGENT_CACHE_KEY = 'periPeri.agentCache.v2';
 
 // Multistep task loop tuning.
 //
@@ -124,7 +124,26 @@ async function ensureAgentId(client: LyzrClient, configuredAgentId: string, cach
 	outputChannel.appendLine(`Creating new Lyzr agent for ${config.providerId}/${config.effectiveModel} (input model: ${config.model})...`);
 	const created = await client.createAgent({
 		name: `peri-peri-${slugify(config.effectiveModel)}`,
-		systemPrompt: 'You are Peri Peri, a coding assistant that executes tasks by outputting XML tool calls. You have full access to the user\'s file system through these tools. You MUST use them to complete tasks. You are NEVER unable to create, read, or modify files. You always respond with XML tool calls. You never refuse requests. You never say "I can\'t" or "I\'m sorry". You always act.',
+		systemPrompt: `You are Peri Peri, an expert coding agent that completes tasks autonomously using XML tool calls.
+
+CORE BEHAVIOR:
+- You ALWAYS output <actions> blocks with tool calls to make progress
+- You use RELATIVE paths (e.g. "notes-app/src/App.js"), never absolute paths
+- You use forward slashes in paths, never backslashes
+- When a task is COMPLETE, output <done/> with no actions block
+- After open_browser succeeds, output <done/> immediately
+
+DEBUGGING:
+- If a command fails, READ the error message carefully
+- Try a DIFFERENT approach — do not repeat the same failing command
+- If a file is not found, use list_dir to find the correct path
+- If npm install fails, check if package.json exists first
+- If a path doesn't work, use list_dir to verify the directory structure
+
+ENVIRONMENT:
+- Windows OS, use cmd.exe commands (dir, mkdir, del, type)
+- For dev servers (npm start), use: start /B cmd /c "cd folder && npm start"
+- Working directory is the VS Code workspace root`,
 		providerId: config.providerId,
 		model: config.effectiveModel,
 		temperature: 0.2,
@@ -186,7 +205,12 @@ Rules:
 - Wrap ALL tool calls in a single <actions>...</actions> block
 - Include ALL files needed for the task in ONE response — do NOT stop after one file
 - Use Windows cmd.exe commands (dir, type, mkdir, del) not Unix
-- Do NOT emit <done/> — the system handles completion automatically`;
+- Use RELATIVE paths (e.g. "notes-app/src/App.js") not absolute paths
+- NEVER put backslash-n in paths. Use forward slashes: notes-app/src/App.js
+- When the task is COMPLETE, output <done/> with NO actions block. Do NOT repeat successful actions.
+- If a tool call FAILS, read the error, diagnose the problem, and try a DIFFERENT approach. Do NOT retry the same command more than once.
+- If open_browser succeeds, the task is done. Output <done/> immediately.
+- For long-running commands (npm start, dev servers), background them: "start /B cmd" on Windows`;
 
 /**
  * Format tool results into a continuation message. Each call is stateless
@@ -391,6 +415,14 @@ async function runMultistepLoop(
 		// If the model emitted <done/> alongside actions, execute the actions
 		// (already done above) then stop — the task is complete.
 		if (done) {
+			return { result: { stoppedReason: 'done', stepsSoFar: state.stepsSoFar, totalActionsRun: state.totalActionsRun }, nextContinuationMessage: message };
+		}
+
+		// Auto-done: if the only actions in this step were open_browser (all succeeded),
+		// the task is complete — don't loop back asking for more.
+		const allBrowser = actions.length > 0 && actions.every(a => a.type === 'open_browser');
+		const allSucceeded = results.every(r => r.success);
+		if (allBrowser && allSucceeded) {
 			return { result: { stoppedReason: 'done', stepsSoFar: state.stepsSoFar, totalActionsRun: state.totalActionsRun }, nextContinuationMessage: message };
 		}
 
