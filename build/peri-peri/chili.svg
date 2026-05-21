@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000">
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#ff6a3c"/>
+      <stop offset="55%" stop-color="#c41e1e"/>
+      <stop offset="100%" stop-color="#5a0000"/>
+    </linearGradient>
+    <linearGradient id="stem" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8cc85a"/>
+      <stop offset="100%" stop-color="#2e782a"/>
+    </linearGradient>
+  </defs>
+  <!-- shadow -->
+  <path d="M380,230 C260,460 340,760 760,880 C820,700 760,360 640,230 C560,200 460,200 380,230 Z"
+        fill="#000" opacity="0.25" transform="translate(14,18)" filter="url(#blur)"/>
+  <!-- body -->
+  <path d="M380,230 C260,460 340,760 760,880 C820,700 760,360 640,230 C560,200 460,200 380,230 Z"
+        fill="url(#body)"/>
+  <!-- highlight -->
+  <path d="M430,290 C370,460 430,720 520,820 C470,700 450,470 470,300 Z"
+        fill="#ffd9c2" opacity="0.55"/>
+  <!-- stem -->
+  <path d="M430,240 C380,170 380,110 430,60 C520,110 600,170 590,240 C520,250 480,250 430,240 Z"
+        fill="url(#stem)"/>
+</svg>

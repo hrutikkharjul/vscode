@@ -64,6 +64,7 @@ Once VS Code opens, press `Ctrl+Shift+P` → **"Open User Settings (JSON)"** →
 | `@peri-peri /explain` | Explain selected code |
 | `@peri-peri /fix` | Find and fix bugs |
 | `@peri-peri /optimize` | Optimize for performance |
+| `@peri-peri /continue` | Resume the paused multistep task |
 
 ## What It Can Do
 
@@ -75,7 +76,7 @@ Once VS Code opens, press `Ctrl+Shift+P` → **"Open User Settings (JSON)"** →
 | ✅ Open browser | `open_browser` |
 | ✅ Execute VS Code commands | `vscode_command` |
 | ✅ List directories | `list_dir` |
-| ✅ Multi-step tasks | Loops up to 10 iterations |
+| ✅ Multi-step tasks | Unbounded tool-use loop with a configurable user check-in checkpoint and an explicit `<done/>` completion signal |
 
 ## Architecture
 
@@ -89,6 +90,31 @@ VS Code Chat Panel
     → Results sent back for continuation
 ```
 
+## Multistep task loop
+
+Peri Peri runs an **unbounded** tool-use loop — there is no fixed iteration ceiling.
+Tuned for Claude Opus 4.7's long horizon, it keeps calling the model until the task
+is finished, the model emits a `<done/>` tag, a safety guard fires, or a checkpoint
+is reached.
+
+At each checkpoint the chat turn ends and a **▶ Continue** follow-up button appears.
+Click it (or send `@peri-peri /continue`) to resume from the exact point where the
+task paused — saved tool results, step counter, and loop-detection state all carry
+over. Send any other message to discard the paused task and start fresh.
+
+| Guard | Default | Purpose |
+|-------|---------|---------|
+| Checkpoint interval | every **25** steps | Pauses the loop and asks the user to confirm before continuing. Configurable via `periPeri.checkpointInterval`. |
+| `MAX_REPEATED_ACTION_REPEATS` | 3 | Aborts if the model emits the same action 3× — stops infinite loops. Persists across `/continue`. |
+| `MAX_RESULT_BYTES_PER_TOOL` | 4 000 | Per-tool output cap in the continuation message. |
+| `MAX_CONTINUATION_BYTES` | 24 000 | Overall cap on the message we send back; older results are dropped first. |
+| `<done/>` signal | — | Model emits `<done/>` (optionally with a one-line summary) to finish cleanly. |
+
+Each iteration shows up in the chat panel as `Step N — working…` so you can watch
+progress in real time. When the loop ends, the chat result metadata includes
+`steps`, `totalActions`, and `stoppedReason`
+(`done` / `no-actions` / `repeated-action` / `checkpoint` / `cancelled` / `error`).
+
 ## Settings Reference
 
 | Setting | Description | Default |
@@ -99,6 +125,7 @@ VS Code Chat Panel
 | `periPeri.sessionId` | Session ID (leave empty for fresh each time) | `""` |
 | `periPeri.baseUrl` | Lyzr API URL | `https://agent-prod.studio.lyzr.ai` |
 | `periPeri.presetName` | Preset from workspace .env | `""` |
+| `periPeri.checkpointInterval` | Steps between user check-ins in the multistep loop | `25` |
 
 ## Troubleshooting
 

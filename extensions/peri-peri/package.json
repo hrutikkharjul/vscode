@@ -39,6 +39,10 @@
 					{
 						"name": "optimize",
 						"description": "Optimize code for performance"
+					},
+					{
+						"name": "continue",
+						"description": "Resume the paused multistep task"
 					}
 				]
 			}
@@ -75,6 +79,12 @@
 					"type": "string",
 					"default": "",
 					"description": "Name of the agent preset to use from workspace .env file"
+				},
+				"periPeri.checkpointInterval": {
+					"type": "integer",
+					"default": 25,
+					"minimum": 1,
+					"description": "Number of tool-use steps between user check-ins. Peri Peri runs an unbounded multistep loop and pauses after this many steps, asking you to confirm before continuing. Set higher for more autonomy, lower for tighter oversight."
 				}
 			}
 		}

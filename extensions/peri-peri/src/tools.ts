@@ -24,11 +24,22 @@ When multiple independent actions are needed, include them all in a single <acti
 Action reference:
 - read_file:       <read_file path="file" />
 - write_file:      <write_file path="file"><![CDATA[full file contents]]></write_file>
-- replace_in_file: <replace_in_file path="file"><search><![CDATA[old text]]></search><replace><![CDATA[new text]]></replace></replace_in_file>
+- replace_in_file: <replace_in_file path="file">
+                     <search><![CDATA[exact text from the file, including indentation]]></search>
+                     <replace><![CDATA[new text]]></replace>
+                   </replace_in_file>
 - list_dir:        <list_dir path="." />
 - run_shell:       <run_shell><![CDATA[command]]></run_shell>
 - vscode_command:  <vscode_command name="command.id" />
 - open_browser:    <open_browser url="https://example.com" />
+
+Notes on replace_in_file:
+- The <search> block must match a UNIQUE region of the file. Only the first
+  occurrence is replaced.
+- Whitespace and indentation must match the file exactly (read_file first if
+  unsure). The runtime auto-normalises CRLF vs LF, so don't worry about that.
+- For brand-new files, use write_file. For broad rewrites of an existing file,
+  prefer write_file with the full new contents over many replace_in_file calls.
 
 Example:
 <actions>
@@ -46,8 +57,17 @@ Do NOT just describe what you will do. Actually DO IT by outputting <actions> bl
 
 /**
  * Parse XML-style action blocks from model response.
+ *
+ * Returns:
+ *  - actions:            list of tool invocations to execute, in document order.
+ *  - textWithoutActions: the model's prose with <actions> blocks (and <done/> markers) stripped.
+ *  - done:               true if the model emitted a <done/> tag, signalling task completion.
  */
-export function parseActions(text: string): { actions: ParsedAction[]; textWithoutActions: string } {
+export function parseActions(text: string): {
+	actions: ParsedAction[];
+	textWithoutActions: string;
+	done: boolean;
+} {
 	const actions: ParsedAction[] = [];
 	const actionsPattern = /<actions>([\s\S]*?)<\/actions>/g;
 	let match;
@@ -64,8 +84,17 @@ export function parseActions(text: string): { actions: ParsedAction[]; textWitho
 		parseOpenBrowser(block, actions);
 	}
 
-	const textWithoutActions = text.replace(actionsPattern, '').trim();
-	return { actions, textWithoutActions };
+	// Detect explicit completion signal. Both <done/> (self-closing) and <done></done> are accepted.
+	const donePattern = /<done\s*\/>|<done>\s*<\/done>/i;
+	const done = donePattern.test(text);
+
+	const textWithoutActions = text
+		.replace(actionsPattern, '')
+		.replace(/<done\s*\/>/gi, '')
+		.replace(/<done>\s*<\/done>/gi, '')
+		.trim();
+
+	return { actions, textWithoutActions, done };
 }
 
 interface ParsedAction {
@@ -81,26 +110,81 @@ function parseReadFile(block: string, actions: ParsedAction[]): void {
 	}
 }
 
+/**
+ * Extract the inner text of a tag from a block. Supports both the CDATA-wrapped
+ * form `<tag><![CDATA[...]]></tag>` and the bare form `<tag>...</tag>`.
+ *
+ * For CDATA blocks, a single leading newline immediately after `[CDATA[` and a
+ * single trailing newline immediately before `]]>` are stripped — they're
+ * formatting artifacts of multi-line XML, not part of the intended content.
+ * Without this, search strings produced by the model don't match the file
+ * because of spurious wrapping whitespace.
+ */
+function extractTaggedContent(source: string, tag: string): string | null {
+	const cdataRe = new RegExp(`<${tag}>\\s*<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>\\s*</${tag}>`);
+	const cdataMatch = cdataRe.exec(source);
+	if (cdataMatch) {
+		return stripWrapperNewlines(cdataMatch[1]);
+	}
+	const plainRe = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+	const plainMatch = plainRe.exec(source);
+	if (plainMatch) {
+		return stripWrapperNewlines(plainMatch[1]);
+	}
+	return null;
+}
+
+function stripWrapperNewlines(s: string): string {
+	let r = s;
+	if (r.startsWith('\r\n')) {
+		r = r.slice(2);
+	} else if (r.startsWith('\n')) {
+		r = r.slice(1);
+	}
+	if (r.endsWith('\r\n')) {
+		r = r.slice(0, -2);
+	} else if (r.endsWith('\n')) {
+		r = r.slice(0, -1);
+	}
+	return r;
+}
+
+function truncateForLog(s: string, max: number): string {
+	if (s.length <= max) {
+		return s;
+	}
+	return `${s.slice(0, max)}…[+${s.length - max} chars]`;
+}
+
 function parseWriteFile(block: string, actions: ParsedAction[]): void {
-	const pattern = /<write_file\s+path="([^"]+)">\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/write_file>/g;
+	// Single pattern for both CDATA and bare forms — the CDATA wrapper is
+	// stripped in extractTaggedContent. Only a single leading/trailing newline
+	// (the formatting artifact) is removed, so trailing newlines that are part
+	// of the file content are preserved.
+	const pattern = /<write_file\s+path="([^"]+)">([\s\S]*?)<\/write_file>/g;
 	let m;
 	while ((m = pattern.exec(block)) !== null) {
-		actions.push({ type: 'write_file', args: { path: m[1], content: m[2].trim() } });
-	}
-	// Also handle without CDATA
-	const pattern2 = /<write_file\s+path="([^"]+)">([\s\S]*?)<\/write_file>/g;
-	while ((m = pattern2.exec(block)) !== null) {
-		if (!m[2].includes('CDATA')) {
-			actions.push({ type: 'write_file', args: { path: m[1], content: m[2].trim() } });
-		}
+		const filePath = m[1];
+		const inner = m[2];
+		const cdataMatch = /^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/.exec(inner);
+		const content = cdataMatch
+			? stripWrapperNewlines(cdataMatch[1])
+			: stripWrapperNewlines(inner);
+		actions.push({ type: 'write_file', args: { path: filePath, content } });
 	}
 }
 
 function parseReplaceInFile(block: string, actions: ParsedAction[]): void {
-	const pattern = /<replace_in_file\s+path="([^"]+)">\s*<search>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/search>\s*<replace>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/replace>\s*<\/replace_in_file>/g;
+	const wrapper = /<replace_in_file\s+path="([^"]+)">([\s\S]*?)<\/replace_in_file>/g;
 	let m;
-	while ((m = pattern.exec(block)) !== null) {
-		actions.push({ type: 'replace_in_file', args: { path: m[1], oldStr: m[2], newStr: m[3] } });
+	while ((m = wrapper.exec(block)) !== null) {
+		const filePath = m[1];
+		const inner = m[2];
+		const oldStr = extractTaggedContent(inner, 'search');
+		const newStr = extractTaggedContent(inner, 'replace');
+		if (oldStr !== null && newStr !== null) {
+			actions.push({ type: 'replace_in_file', args: { path: filePath, oldStr, newStr } });
+		}
 	}
 }
 
@@ -113,16 +197,16 @@ function parseListDir(block: string, actions: ParsedAction[]): void {
 }
 
 function parseRunShell(block: string, actions: ParsedAction[]): void {
-	const pattern = /<run_shell>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/run_shell>/g;
+	const pattern = /<run_shell>([\s\S]*?)<\/run_shell>/g;
 	let m;
 	while ((m = pattern.exec(block)) !== null) {
-		actions.push({ type: 'run_shell', args: { command: m[1].trim() } });
-	}
-	// Without CDATA
-	const pattern2 = /<run_shell>([\s\S]*?)<\/run_shell>/g;
-	while ((m = pattern2.exec(block)) !== null) {
-		if (!m[1].includes('CDATA')) {
-			actions.push({ type: 'run_shell', args: { command: m[1].trim() } });
+		const inner = m[1];
+		const cdataMatch = /^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/.exec(inner);
+		const command = cdataMatch
+			? stripWrapperNewlines(cdataMatch[1]).trim()
+			: stripWrapperNewlines(inner).trim();
+		if (command) {
+			actions.push({ type: 'run_shell', args: { command } });
 		}
 	}
 }
@@ -192,28 +276,114 @@ async function execReadFile(args: Record<string, any>): Promise<ToolResult> {
 async function execWriteFile(args: Record<string, any>, stream: vscode.ChatResponseStream): Promise<ToolResult> {
 	const filePath = resolvePath(args.path);
 	const uri = vscode.Uri.file(filePath);
+
+	// Track whether the file already existed so we can report Created vs Updated
+	// — both for the user's chat output and for the model's tool_result.
+	let existed = false;
+	try {
+		await vscode.workspace.fs.stat(uri);
+		existed = true;
+	} catch {
+		// did not exist
+	}
+
 	// Ensure parent directory exists
 	const dir = path.dirname(filePath);
 	try {
 		await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir));
 	} catch { /* already exists */ }
-	await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(args.content));
-	stream.markdown(`\n📝 Created: \`${args.path}\`\n`);
-	return { tool: 'write_file', success: true, output: `Written: ${filePath}` };
+
+	const content: string = typeof args.content === 'string' ? args.content : String(args.content ?? '');
+	await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+
+	const verb = existed ? 'Updated' : 'Created';
+	const icon = existed ? '✏️' : '📝';
+	stream.markdown(`\n${icon} ${verb}: \`${args.path}\`\n`);
+	return { tool: 'write_file', success: true, output: `${verb}: ${filePath} (${content.length} chars)` };
 }
 
 async function execReplaceInFile(args: Record<string, any>, stream: vscode.ChatResponseStream): Promise<ToolResult> {
 	const filePath = resolvePath(args.path);
 	const uri = vscode.Uri.file(filePath);
-	const bytes = await vscode.workspace.fs.readFile(uri);
-	const original = new TextDecoder().decode(bytes);
-	if (!original.includes(args.oldStr)) {
-		return { tool: 'replace_in_file', success: false, output: 'Search string not found' };
+
+	let original: string;
+	try {
+		const bytes = await vscode.workspace.fs.readFile(uri);
+		original = new TextDecoder().decode(bytes);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		return {
+			tool: 'replace_in_file',
+			success: false,
+			output: `Could not read ${filePath}: ${msg}. The file may not exist — use list_dir to verify the path or write_file to create it.`,
+		};
 	}
-	const updated = original.replace(args.oldStr, args.newStr);
+
+	const oldStr: string = typeof args.oldStr === 'string' ? args.oldStr : '';
+	const newStr: string = typeof args.newStr === 'string' ? args.newStr : '';
+
+	if (!oldStr) {
+		return {
+			tool: 'replace_in_file',
+			success: false,
+			output: 'Empty <search> block. Provide the exact text to replace.',
+		};
+	}
+
+	// Detect the file's predominant line ending so we can preserve it on write.
+	const fileEol: '\r\n' | '\n' = original.includes('\r\n') ? '\r\n' : '\n';
+
+	let updated: string | null = null;
+	let matchStrategy = 'exact';
+
+	// Strategy 1: exact byte match.
+	if (original.includes(oldStr)) {
+		updated = original.replace(oldStr, newStr);
+	}
+
+	// Strategy 2: normalize line endings on both sides and retry. This handles
+	// the common case where the file is CRLF on Windows but the model emitted
+	// LF-only search/replace strings (or vice versa).
+	if (updated === null) {
+		const norm = (s: string) => s.replace(/\r\n/g, '\n');
+		const origN = norm(original);
+		const oldN = norm(oldStr);
+		if (origN.includes(oldN)) {
+			const newN = norm(newStr);
+			const updatedN = origN.replace(oldN, newN);
+			updated = fileEol === '\r\n' ? updatedN.replace(/\n/g, '\r\n') : updatedN;
+			matchStrategy = 'eol-normalized';
+		}
+	}
+
+	if (updated === null) {
+		// Helpful diagnostic so the model can self-correct on the next turn.
+		const lines = [
+			`Search string not found in ${filePath}.`,
+			``,
+			`Looked for (${oldStr.length} chars):`,
+			truncateForLog(oldStr, 600),
+			``,
+			`File content (${original.length} chars):`,
+			truncateForLog(original, 1200),
+			``,
+			`Tip: read_file the file again and copy the EXACT text — including indentation, blank lines, and line endings. The runtime already retries with CRLF/LF normalised, so a remaining mismatch is in the actual characters.`,
+		];
+		return { tool: 'replace_in_file', success: false, output: lines.join('\n') };
+	}
+
+	if (updated === original) {
+		return {
+			tool: 'replace_in_file',
+			success: true,
+			output: `No change needed in ${filePath} — the replacement is identical to the existing text.`,
+		};
+	}
+
 	await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(updated));
 	stream.markdown(`\n✏️ Edited: \`${args.path}\`\n`);
-	return { tool: 'replace_in_file', success: true, output: `Replaced in ${filePath}` };
+	const note = matchStrategy === 'eol-normalized' ? ' (matched after EOL normalisation)' : '';
+	return { tool: 'replace_in_file', success: true, output: `Replaced in ${filePath}${note}` };
 }
 
 async function execListDir(args: Record<string, any>): Promise<ToolResult> {

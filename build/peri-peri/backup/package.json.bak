@@ -1,9 +1,9 @@
 {
-  "name": "periperi",
+  "name": "code-oss-dev",
   "version": "1.122.0",
   "distro": "9897f32f1899b7b2c8e5d0701c5d99458bb8de9e",
   "author": {
-    "name": "PeriPeri"
+    "name": "Microsoft Corporation"
   },
   "license": "MIT",
   "main": "./out/main.js",
