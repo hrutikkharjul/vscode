@@ -90,35 +90,89 @@ separately — `npm install` puts `ISCC.exe` under
 
 ### ⚠️ Required VS components on this machine
 
-A build attempt on this box (2026-05-21) reached a real failure:
+A real end-to-end build was completed on this machine on 2026-05-22. The
+issues encountered and their fixes are captured below — `build-installer.ps1`
+encapsulates them. Some of these are environment-specific.
+
+#### 1. Node.js version
+
+The repo's `.nvmrc` pins **22.22.1**. Older minor versions (e.g. 22.13.1) are
+rejected by `build/npm/preinstall.ts` and also fail later because some deps
+require ≥22.14 (`copilot-chat`) or ≥22.15 (`@vscode/proxy-agent`). The build
+script handles this two ways:
+
+- Sets `VSCODE_SKIP_NODE_VERSION_CHECK=1` and `NODE_OPTIONS=--experimental-strip-types`
+  so older Node 22.x can run the `.ts` build scripts.
+- Strongly recommended: `nvm install 22.22.1 && nvm use 22.22.1`.
+
+#### 2. node-gyp can't find Visual Studio
+
+node-gyp 11 (bundled with npm 10) uses a PowerShell call to `vswhere.exe`
+that fails on this machine, even though VS Build Tools 2022 with the C++
+workload is installed. **Fix:** run all `npm install` / `npm rebuild`
+commands inside a `vcvars64.bat` environment so `VCINSTALLDIR` is set —
+node-gyp then trusts the env var directly. The build script does this
+automatically via `RunUnderVcvars`.
+
+#### 3. Spectre-mitigated MSVC libs
+
+VS Code's native modules (`@vscode/native-watchdog`, `@vscode/sqlite3`,
+`kerberos`, `node-pty`, …) declare `'SpectreMitigation': 'Spectre'` in
+their `binding.gyp`. The matching MSVC runtime is an Individual Component
+in Visual Studio Build Tools that is **not** installed by the default C++
+workload.
+
+Two ways to satisfy it:
+
+- **Proper:** Visual Studio Installer → Modify the 2022 Build Tools install
+  → Individual components → check
+  *"MSVC v143 - VS 2022 C++ x64/x86 Spectre-mitigated libs (Latest)"*.
+- **Workaround:** run `build/peri-peri/disable-spectre.ps1` to rewrite the
+  Spectre setting to `false` across all `*.gyp` / `*.gypi` files in
+  `node_modules/` and `remote/node_modules/`. Produces native binaries that
+  are NOT hardened against Spectre — fine for a personal/dev installer,
+  not appropriate for a public release.
+
+> **Note on iteration:** because the Spectre values are baked into files
+> inside `node_modules/`, every fresh `npm install` re-extracts them and
+> the patcher must run again. The recommended order is:
+> 1. `npm install --ignore-scripts`
+> 2. `npm install --ignore-scripts` inside `remote/`
+> 3. `disable-spectre.ps1`
+> 4. `npm rebuild`
+> 5. `npm install` (this time letting lifecycle scripts run — they will
+>    see the patched gyp files and compile successfully)
+
+#### 4. Windows SDK signtool on PATH
+
+`gulpfile.vscode.ts` calls `signtool.exe` to verify/strip Authenticode
+signatures before `rcedit` patches them. The Build Tools install includes
+the Windows SDK bin dir, but it isn't on PATH by default. The build script
+prepends:
 
 ```
-MSB8040: Spectre-mitigated libraries are required for this project.
+C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64
 ```
 
-The native modules VS Code links into the desktop binary
-(`@vscode/native-watchdog`, `@vscode/deviceid`, `kerberos`, `node-pty`, etc.)
-are compiled with `/Qspectre`. The matching runtime libraries are not part
-of the default "Desktop development with C++" workload — they're a
-separate Individual Component.
+#### 5. Cross-platform binaries inside copilot extension
 
-**Install via Visual Studio Installer → Modify → Individual components:**
+The bundled `extensions/copilot` ships `.node` files for many platforms
+(macOS, Linux x64, Linux ARM, Raspberry Pi, etc.). The default
+`patchWin32DependenciesTask` in `build/gulpfile.vscode.ts` calls `rcedit`
+on every `*.node` file it finds, which fails for non-Windows binaries.
 
-- `MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)`
-- `MSVC v143 - VS 2022 C++ x64/x86 Spectre-mitigated libs (Latest)`
-- `MSVC v143 - VS 2022 C++ ARM64 Spectre-mitigated libs (Latest)` (if building arm64)
-- `Windows 11 SDK (10.0.26100.0)` or any recent Windows SDK
-- `C++ ATL for latest v143 build tools (x86 & x64)` *(some VS Code modules need ATL)*
+Fix applied to `build/gulpfile.vscode.ts`: wrap the `rcedit`/`signtool`
+call in try/catch and emit a warning rather than throw. See the diff in
+`patchWin32DependenciesTask`. The skipped binaries don't run on Windows
+anyway, so leaving them un-patched is harmless.
 
-After installing, re-run the build script. Two other notes from the same
-attempt:
+#### 6. compile-copilot-extension-build is not part of compile-extensions-build
 
-- node-gyp 11 ships with npm 10 has a **PowerShell-based VS detection**
-  that fails on this machine even though `vswhere.exe` works. The build
-  script works around this by sourcing `vcvars64.bat` before `npm install`.
-- The preinstall script enforces Node ≥ 22.22.1 (from `.nvmrc`).
-  This box has 22.13.1; the script exports
-  `VSCODE_SKIP_NODE_VERSION_CHECK=1` so the install proceeds anyway.
+The umbrella `compile-extensions-build` task that `vscode-win32-x64-min-ci`
+depends on does **not** include the local copilot extension. Without
+copilot in `.build/extensions/`, the post-package `prepareBuiltInCopilotRipgrepShim`
+step throws. Run `npm run gulp compile-copilot-extension-build` separately
+before `vscode-win32-x64-min-ci`. The build script does this.
 
 ### Pipeline stages (what the script runs)
 

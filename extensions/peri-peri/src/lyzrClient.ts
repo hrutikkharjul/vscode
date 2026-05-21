@@ -42,22 +42,39 @@ export class LyzrClient {
 	}
 
 	async chat(params: { userId: string; agentId: string; sessionId: string; message: string }): Promise<{ response: string }> {
-		return this.request('/v3/inference/chat/', {
-			method: 'POST',
-			body: JSON.stringify({
-				user_id: params.userId,
-				agent_id: params.agentId,
-				session_id: params.sessionId,
-				message: params.message,
-			}),
-		});
+		// Retry on transient errors (Bedrock 503s, rate limits, etc.)
+		let lastError: Error | undefined;
+		for (let attempt = 0; attempt < 3; attempt++) {
+			try {
+				return await this.request<{ response: string }>('/v3/inference/chat/', {
+					method: 'POST',
+					body: JSON.stringify({
+						user_id: params.userId,
+						agent_id: params.agentId,
+						session_id: params.sessionId,
+						message: params.message,
+					}),
+				});
+			} catch (err) {
+				lastError = err instanceof Error ? err : new Error(String(err));
+				const msg = lastError.message.toLowerCase();
+				const isTransient = msg.includes('serviceunavailable') || msg.includes('429') || msg.includes('503') || msg.includes('try your request again') || msg.includes('throttl');
+				if (!isTransient || attempt === 2) {
+					throw lastError;
+				}
+				// Exponential backoff: 2s, 4s
+				await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+			}
+		}
+		throw lastError!;
 	}
 
-	async createAgent(params: { name: string; providerId: string; model: string; temperature?: number; topP?: number }): Promise<{ agent_id: string }> {
+	async createAgent(params: { name: string; systemPrompt?: string; providerId: string; model: string; temperature?: number; topP?: number }): Promise<{ agent_id: string }> {
 		return this.request('/v3/agents/', {
 			method: 'POST',
 			body: JSON.stringify({
 				name: params.name,
+				system_prompt: params.systemPrompt ?? '',
 				provider_id: params.providerId,
 				model: params.model,
 				temperature: params.temperature ?? 0.2,

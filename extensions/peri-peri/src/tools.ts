@@ -86,12 +86,15 @@ export function parseActions(text: string): {
 	done: boolean;
 } {
 	const actions: ParsedAction[] = [];
+
+	// Strip markdown code fences that some models wrap around XML output
+	const cleaned = text.replace(/```(?:xml)?\s*\n?([\s\S]*?)\n?```/g, '$1');
+
+	// Try parsing from <actions>...</actions> blocks first
 	const actionsPattern = /<actions>([\s\S]*?)<\/actions>/g;
 	let match;
-
-	while ((match = actionsPattern.exec(text)) !== null) {
+	while ((match = actionsPattern.exec(cleaned)) !== null) {
 		const block = match[1];
-		// Parse individual actions within the block
 		parseReadFile(block, actions);
 		parseWriteFile(block, actions);
 		parseReplaceInFile(block, actions);
@@ -101,17 +104,41 @@ export function parseActions(text: string): {
 		parseOpenBrowser(block, actions);
 	}
 
-	// Detect explicit completion signal. Both <done/> (self-closing) and <done></done> are accepted.
-	const donePattern = /<done\s*\/>|<done>\s*<\/done>/i;
-	const done = donePattern.test(text);
+	// If no <actions> wrapper found, try parsing bare tool calls from the full text.
+	// GPT-4o sometimes outputs tool XML directly without the wrapper.
+	if (actions.length === 0) {
+		parseReadFile(cleaned, actions);
+		parseWriteFile(cleaned, actions);
+		parseReplaceInFile(cleaned, actions);
+		parseListDir(cleaned, actions);
+		parseRunShell(cleaned, actions);
+		parseVscodeCommand(cleaned, actions);
+		parseOpenBrowser(cleaned, actions);
+	}
 
-	const textWithoutActions = text
+	// Detect explicit completion signal
+	const donePattern = /<done\s*\/>|<done>\s*<\/done>/i;
+	const done = donePattern.test(cleaned);
+
+	// Strip parsed content from text output
+	let textWithoutActions = cleaned
 		.replace(actionsPattern, '')
 		.replace(/<done\s*\/>/gi, '')
-		.replace(/<done>\s*<\/done>/gi, '')
-		.trim();
+		.replace(/<done>\s*<\/done>/gi, '');
 
-	return { actions, textWithoutActions, done };
+	// If we parsed bare tool calls, strip them too
+	if (actions.length > 0) {
+		textWithoutActions = textWithoutActions
+			.replace(/<write_file[\s\S]*?<\/write_file>/g, '')
+			.replace(/<read_file\s+path="[^"]+"\s*\/>/g, '')
+			.replace(/<list_dir\s+path="[^"]+"\s*\/>/g, '')
+			.replace(/<run_shell>[\s\S]*?<\/run_shell>/g, '')
+			.replace(/<replace_in_file[\s\S]*?<\/replace_in_file>/g, '')
+			.replace(/<vscode_command\s+name="[^"]+"\s*\/>/g, '')
+			.replace(/<open_browser\s+url="[^"]+"\s*\/>/g, '');
+	}
+
+	return { actions, textWithoutActions: textWithoutActions.trim(), done };
 }
 
 interface ParsedAction {

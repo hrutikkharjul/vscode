@@ -556,11 +556,14 @@ function patchWin32DependenciesTask(destinationFolderName: string) {
 
 	return async () => {
 		const versionedResourcesFolder = util.getVersionedResourcesFolder('win32', commit!);
-		const deps = (await Promise.all([
-			glob('**/*.node', { cwd, ignore: 'extensions/node_modules/@parcel/watcher/**' }),
-			glob('**/rg.exe', { cwd }),
-			glob('**/*explorer_command*.dll', { cwd }),
-		])).flatMap(o => o);
+		const allNodeFiles = await glob('**/*.node', { cwd, ignore: 'extensions/node_modules/@parcel/watcher/**' });
+		const isNonWindowsNative = (p: string) => /[\\\/](mac|darwin|linux|android|freebsd|raspberry-?pi[0-9]*|beaglebone|jetson|x64-linux|arm64-linux|arm-linux|x64-darwin|arm64-darwin|x64-mac|arm64-mac)[\\\/]/i.test(p);
+		const winNodeFiles = allNodeFiles.filter((p: string) => !isNonWindowsNative(p));
+		const deps = ([
+			winNodeFiles,
+			await glob('**/rg.exe', { cwd }),
+			await glob('**/*explorer_command*.dll', { cwd }),
+		]).flatMap(o => o);
 		const packageJson = JSON.parse(await fs.promises.readFile(path.join(cwd, versionedResourcesFolder, 'resources', 'app', 'package.json'), 'utf8'));
 		const product = JSON.parse(await fs.promises.readFile(path.join(cwd, versionedResourcesFolder, 'resources', 'app', 'product.json'), 'utf8'));
 		const baseVersion = packageJson.version.replace(/-.*$/, '');
@@ -569,20 +572,26 @@ function patchWin32DependenciesTask(destinationFolderName: string) {
 			const basename = path.basename(dep);
 			const fullPath = path.join(cwd, dep);
 
-			await stripAuthenticodeSignature(fullPath);
-			await rcedit(fullPath, {
-				'file-version': baseVersion,
-				'version-string': {
-					'CompanyName': 'Microsoft Corporation',
-					'FileDescription': product.nameLong,
-					'FileVersion': packageJson.version,
-					'InternalName': basename,
-					'LegalCopyright': 'Copyright (C) 2026 Microsoft. All rights reserved',
-					'OriginalFilename': basename,
-					'ProductName': product.nameLong,
-					'ProductVersion': packageJson.version,
-				}
-			});
+			try {
+				await stripAuthenticodeSignature(fullPath);
+				await rcedit(fullPath, {
+					'file-version': baseVersion,
+					'version-string': {
+						'CompanyName': 'Microsoft Corporation',
+						'FileDescription': product.nameLong,
+						'FileVersion': packageJson.version,
+						'InternalName': basename,
+						'LegalCopyright': 'Copyright (C) 2026 Microsoft. All rights reserved',
+						'OriginalFilename': basename,
+						'ProductName': product.nameLong,
+						'ProductVersion': packageJson.version,
+					}
+				});
+			} catch (err) {
+				// Some bundled extensions ship cross-platform binaries (e.g. mac/linux .node files).
+				// rcedit can only patch Windows PE files; skip everything else with a warning.
+				console.warn(`[patchWin32Dependencies] skipped ${dep}: ${(err as Error).message}`);
+			}
 		});
 
 		await Promise.all(patchPromises);

@@ -20,6 +20,12 @@
 		}
 	},
 	"contributes": {
+		"commands": [
+			{
+				"command": "periPeri.resetAgent",
+				"title": "Peri Peri: Reset Agent (force new agent creation)"
+			}
+		],
 		"chatParticipants": [
 			{
 				"id": "intrix.peri-peri",
