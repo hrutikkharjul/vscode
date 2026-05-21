@@ -408,6 +408,78 @@ async function runMultistepLoop(
 }
 
 /**
+ * Extract recent chat history from VS Code's ChatContext for conversational continuity.
+ * Keeps the last N turns to avoid blowing up the context window.
+ */
+function buildChatHistory(chatContext: vscode.ChatContext, maxTurns = 10): string {
+	const history = chatContext.history;
+	if (!history || history.length === 0) {
+		return '';
+	}
+
+	const recent = history.slice(-maxTurns);
+	const lines: string[] = [];
+
+	for (const turn of recent) {
+		if (turn instanceof vscode.ChatRequestTurn) {
+			lines.push(`User: ${turn.prompt}`);
+		} else if (turn instanceof vscode.ChatResponseTurn) {
+			// Extract text parts from the response
+			const parts: string[] = [];
+			for (const part of turn.response) {
+				if (part instanceof vscode.ChatResponseMarkdownPart) {
+					parts.push(part.value.value);
+				}
+			}
+			if (parts.length > 0) {
+				const text = parts.join('').slice(0, 2000);
+				lines.push(`Assistant: ${text}`);
+			}
+		}
+	}
+
+	if (lines.length === 0) {
+		return '';
+	}
+
+	return `<conversation_history>\n${lines.join('\n')}\n</conversation_history>`;
+}
+
+/**
+ * Get active editor context: current file path, language, and selection/visible code.
+ */
+function getEditorContext(): string {
+	const editor = vscode.window.activeTextEditor;
+	if (!editor) {
+		return '';
+	}
+
+	const doc = editor.document;
+	const filePath = vscode.workspace.asRelativePath(doc.uri);
+	const lang = doc.languageId;
+
+	let codeSnippet = '';
+	const selection = editor.selection;
+	if (!selection.isEmpty) {
+		codeSnippet = doc.getText(selection).slice(0, 3000);
+	} else {
+		// Use visible range as context
+		const visibleRange = editor.visibleRanges[0];
+		if (visibleRange) {
+			codeSnippet = doc.getText(visibleRange).slice(0, 3000);
+		}
+	}
+
+	const parts = [`<active_editor path="${filePath}" language="${lang}">`];
+	if (codeSnippet) {
+		parts.push(codeSnippet);
+	}
+	parts.push('</active_editor>');
+
+	return parts.join('\n');
+}
+
+/**
  * Render the appropriate end-of-turn markdown for a stop reason and return the
  * ChatResult metadata.
  */
@@ -475,7 +547,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	});
 	context.subscriptions.push(resetCmd);
 
-	const participant = vscode.chat.createChatParticipant(PARTICIPANT_ID, async (request, _chatContext, stream, token) => {
+	const participant = vscode.chat.createChatParticipant(PARTICIPANT_ID, async (request, chatContext, stream, token) => {
 		// Lyzr API (only backend)
 		const config = await loadConfig();
 
@@ -571,11 +643,15 @@ export function activate(context: vscode.ExtensionContext): void {
 			? `${commandPrefix}\n\n${request.prompt.trim()}`
 			: request.prompt.trim();
 
+		// Gather contextual information
+		const historyBlock = buildChatHistory(chatContext);
+		const editorBlock = getEditorContext();
+
 		// Build initial message with inline tool schema (proven to work via API testing).
 		// Each API call uses a FRESH session ID because Claude rejects tool_results
 		// in the same session as "fabricated". Stateless approach works reliably.
 		const initialMessage = `${INLINE_TOOL_SCHEMA}
-${fileContext ? '\n' + fileContext + '\n' : ''}
+${historyBlock ? '\n' + historyBlock + '\n' : ''}${editorBlock ? '\n' + editorBlock + '\n' : ''}${fileContext ? '\n' + fileContext + '\n' : ''}
 Task: ${userRequest}
 
 Create ALL necessary files in a single <actions> block. Do not use create-react-app or any scaffolding tools — write the files directly.
