@@ -603,6 +603,8 @@ async function execOpenBrowser(args: Record<string, any>, stream: vscode.ChatRes
 }
 
 
+const TERMINAL_WATCH_MS = 8000; // how long to watch terminal output for errors
+
 async function execRunInTerminal(args: Record<string, any>, stream: vscode.ChatResponseStream): Promise<ToolResult> {
 	let cmd: string = typeof args.command === 'string' ? args.command : '';
 	cmd = cmd.replace(/\r?\n/g, ' && ').trim();
@@ -610,14 +612,109 @@ async function execRunInTerminal(args: Record<string, any>, stream: vscode.ChatR
 		return { tool: 'run_in_terminal', success: false, output: 'Empty command.' };
 	}
 
-	const name = typeof args.name === 'string' ? args.name : 'Peri Peri';
+	const name = typeof args.name === 'string' && args.name ? args.name : 'Peri Peri';
 	const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
 	stream.markdown(`\n🖥️ Terminal: \`${cmd}\`\n`);
 
-	const terminal = vscode.window.createTerminal({ name, cwd });
-	terminal.show(false);
-	terminal.sendText(cmd);
+	// Use a custom Pseudoterminal to capture output while still showing it in the terminal
+	let capturedOutput = '';
+	let processExited = false;
+	let exitCode: number | undefined;
 
-	return { tool: 'run_in_terminal', success: true, output: `Started in terminal "${name}": ${cmd}` };
+	const writeEmitter = new vscode.EventEmitter<string>();
+	const closeEmitter = new vscode.EventEmitter<number | void>();
+
+	const pty: vscode.Pseudoterminal = {
+		onDidWrite: writeEmitter.event,
+		onDidClose: closeEmitter.event,
+		open() {
+			// Spawn the actual process
+			const child = childProcess.spawn(cmd, [], {
+				cwd,
+				shell: true,
+				windowsHide: true,
+			});
+
+			child.stdout?.on('data', (data: Buffer) => {
+				const text = data.toString();
+				capturedOutput += text;
+				// Write to terminal display (convert \n to \r\n for terminal)
+				writeEmitter.fire(text.replace(/\n/g, '\r\n'));
+			});
+
+			child.stderr?.on('data', (data: Buffer) => {
+				const text = data.toString();
+				capturedOutput += text;
+				writeEmitter.fire(text.replace(/\n/g, '\r\n'));
+			});
+
+			child.on('error', (err) => {
+				const msg = `Failed to start: ${err.message}`;
+				capturedOutput += msg;
+				writeEmitter.fire(`\r\n${msg}\r\n`);
+				processExited = true;
+				exitCode = 1;
+				closeEmitter.fire(1);
+			});
+
+			child.on('close', (code) => {
+				processExited = true;
+				exitCode = code ?? undefined;
+				closeEmitter.fire(code ?? 0);
+			});
+		},
+		close() { /* terminal closed by user */ },
+	};
+
+	const terminal = vscode.window.createTerminal({ name, pty });
+	terminal.show(false);
+
+	// Wait for either process exit or timeout to capture initial output
+	await new Promise<void>((resolve) => {
+		const timer = setTimeout(resolve, TERMINAL_WATCH_MS);
+		closeEmitter.event(() => {
+			clearTimeout(timer);
+			// Give a tiny delay to collect final output
+			setTimeout(resolve, 200);
+		});
+	});
+
+	// Analyze captured output for errors
+	const output = capturedOutput.replace(/\u001b\[[0-9;]*m/g, '').trim();
+	const outputSnippet = output.length > 3000 ? `${output.slice(-3000)}\n…[truncated, showing last 3000 chars]` : output;
+
+	if (processExited && exitCode !== 0) {
+		stream.markdown(`\n❌ Terminal exited with code ${exitCode}\n`);
+		return {
+			tool: 'run_in_terminal',
+			success: false,
+			output: `Process exited with code ${exitCode}.\nOutput:\n${outputSnippet}`,
+		};
+	}
+
+	// Check for common error patterns even if process is still running
+	const lowerOutput = output.toLowerCase();
+	const hasError = lowerOutput.includes('error') && !lowerOutput.includes('0 errors');
+	const hasFailed = lowerOutput.includes('failed to compile') || lowerOutput.includes('enoent') || lowerOutput.includes('module not found');
+
+	if (hasError || hasFailed) {
+		stream.markdown(`\n⚠️ Terminal shows errors:\n\`\`\`\n${outputSnippet.slice(-1500)}\n\`\`\`\n`);
+		return {
+			tool: 'run_in_terminal',
+			success: false,
+			output: `Process started but has errors:\n${outputSnippet}`,
+		};
+	}
+
+	// Success — process is running or completed cleanly
+	const status = processExited ? `Completed (exit 0)` : `Running in terminal "${name}"`;
+	if (outputSnippet) {
+		stream.markdown(`\n✅ ${status}\n`);
+	}
+	return {
+		tool: 'run_in_terminal',
+		success: true,
+		output: `${status}\nOutput:\n${outputSnippet || '(no output yet)'}`,
+	};
 }
