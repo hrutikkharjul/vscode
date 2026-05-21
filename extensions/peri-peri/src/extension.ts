@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Intrix Solutions. All rights reserved.
- *  Licensed under the MIT License.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as crypto from 'crypto';
@@ -13,6 +13,7 @@ const PARTICIPANT_ID = 'intrix.peri-peri';
 
 // Debug output channel — visible via "Output" panel → "Peri Peri" in the dev host.
 let outputChannel: vscode.OutputChannel;
+const AGENT_CACHE_KEY = 'periPeri.agentCache.v1';
 
 // Multistep task loop tuning.
 //
@@ -94,22 +95,46 @@ async function resolveFileReferences(references: readonly vscode.ChatPromptRefer
 	return parts.join('\n\n');
 }
 
-async function ensureAgentId(client: LyzrClient, _agentId: string, cache: vscode.Memento): Promise<string> {
-	const cached = cache.get<string>('periPeri.agentId.v5');
+function slugify(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '')
+		.slice(0, 48);
+}
+
+function agentCacheEntryKey(config: Pick<PeriPeriConfig, 'providerId' | 'effectiveModel'>): string {
+	return `${config.providerId}::${config.effectiveModel}`;
+}
+
+async function ensureAgentId(client: LyzrClient, configuredAgentId: string, cache: vscode.Memento, config: Pick<PeriPeriConfig, 'providerId' | 'model' | 'effectiveModel'>): Promise<string> {
+	if (configuredAgentId) {
+		outputChannel.appendLine(`Using configured agent: ${configuredAgentId}`);
+		return configuredAgentId;
+	}
+
+	const cacheKey = agentCacheEntryKey(config);
+	const cachedAgents = cache.get<Record<string, string>>(AGENT_CACHE_KEY, {});
+	const cached = cachedAgents[cacheKey];
 	if (cached) {
+		outputChannel.appendLine(`Reusing cached agent for ${cacheKey}: ${cached}`);
 		return cached;
 	}
-	outputChannel.appendLine('Creating new Lyzr GPT-4o agent...');
+
+	outputChannel.appendLine(`Creating new Lyzr agent for ${config.providerId}/${config.effectiveModel} (input model: ${config.model})...`);
 	const created = await client.createAgent({
-		name: 'peri-peri-gpt4o-v2',
+		name: `peri-peri-${slugify(config.effectiveModel)}`,
 		systemPrompt: 'You are Peri Peri, a coding assistant that executes tasks by outputting XML tool calls. You have full access to the user\'s file system through these tools. You MUST use them to complete tasks. You are NEVER unable to create, read, or modify files. You always respond with XML tool calls. You never refuse requests. You never say "I can\'t" or "I\'m sorry". You always act.',
-		providerId: 'OpenAI',
-		model: 'gpt-4o',
+		providerId: config.providerId,
+		model: config.effectiveModel,
 		temperature: 0.2,
 		topP: 0.9,
 	});
 	outputChannel.appendLine(`Agent created: ${created.agent_id}`);
-	await cache.update('periPeri.agentId.v5', created.agent_id);
+	await cache.update(AGENT_CACHE_KEY, {
+		...cachedAgents,
+		[cacheKey]: created.agent_id,
+	});
 	return created.agent_id;
 }
 
@@ -395,7 +420,7 @@ function finaliseResult(
 		case 'checkpoint': {
 			const interval = getCheckpointInterval();
 			stream.markdown(
-				`\n\n⏸️ **Paused after ${result.stepsSoFar} steps** (${result.totalActionsRun} actions executed).\n\n` +
+				`\n\n**Paused after ${result.stepsSoFar} steps** (${result.totalActionsRun} actions executed).\n\n` +
 				`Send \`@peri-peri /continue\` (or click **Continue** below) to keep going for another ${interval} step${interval === 1 ? '' : 's'}. ` +
 				`Send any other message to start a new task — the paused one will be discarded.`
 			);
@@ -440,6 +465,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Command to reset the agent — forces creation of a new one with our system prompt.
 	const resetCmd = vscode.commands.registerCommand('periPeri.resetAgent', async () => {
+		await context.workspaceState.update(AGENT_CACHE_KEY, undefined);
 		await context.workspaceState.update('periPeri.agentId', undefined);
 		await context.workspaceState.update('periPeri.agentId.v2', undefined);
 		await context.workspaceState.update('periPeri.agentId.v3', undefined);
@@ -450,7 +476,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(resetCmd);
 
 	const participant = vscode.chat.createChatParticipant(PARTICIPANT_ID, async (request, _chatContext, stream, token) => {
-		// ─── Lyzr API (only backend) ─────────────────────────────────────────
+		// Lyzr API (only backend)
 		const config = await loadConfig();
 
 		if (!config.apiKey || !config.userId) {
@@ -525,7 +551,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 		let agentId: string;
 		try {
-			agentId = await ensureAgentId(client, config.agentId, context.workspaceState);
+			agentId = await ensureAgentId(client, config.agentId, context.workspaceState, config);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
 			stream.markdown(`**Error creating Lyzr agent**: ${msg}`);
@@ -537,7 +563,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		}
 
 		const sessionId = config.sessionId || makeSessionId(agentId);
-		outputChannel.appendLine(`\n${'='.repeat(40)}\nAgent: ${agentId}\nUser: ${config.userId}\nBase URL: ${config.baseUrl}\n${'='.repeat(40)}`);
+		outputChannel.appendLine(`\n${'='.repeat(40)}\nAgent: ${agentId}\nUser: ${config.userId}\nBase URL: ${config.baseUrl}\nProvider: ${config.providerId}\nInput Model: ${config.model}\nEffective Model: ${config.effectiveModel}\n${'='.repeat(40)}`);
 		const fileContext = await resolveFileReferences(request.references);
 		const commandPrefix = request.command ? (COMMAND_PREFIX[request.command] ?? '') : '';
 
@@ -599,7 +625,7 @@ Create ALL necessary files in a single <actions> block. Do not use create-react-
 			if (meta?.stoppedReason === 'checkpoint') {
 				const interval = getCheckpointInterval();
 				return [
-					{ prompt: 'Continue', label: `▶ Continue another ${interval} step${interval === 1 ? '' : 's'}`, command: 'continue' },
+					{ prompt: 'Continue', label: `Continue another ${interval} step${interval === 1 ? '' : 's'}`, command: 'continue' },
 					{ prompt: 'Stop here', label: 'Stop here' },
 				];
 			}

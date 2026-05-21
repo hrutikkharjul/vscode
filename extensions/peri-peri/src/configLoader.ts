@@ -1,9 +1,20 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Intrix Solutions. All rights reserved.
- *  Licensed under the MIT License.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+
+const DEFAULT_BASE_URL = 'https://agent-prod.studio.lyzr.ai';
+const DEFAULT_MODEL = 'anthropic.claude-opus-4-6-v1';
+
+const PROFILE_REQUIRED_ANTHROPIC_MODELS = new Set([
+	'anthropic.claude-sonnet-4-6',
+	'anthropic.claude-haiku-4-5-20251001-v1:0',
+	'anthropic.claude-opus-4-7',
+	'anthropic.claude-sonnet-4-5-20250929-v1:0',
+	'anthropic.claude-opus-4-6-v1',
+]);
 
 export interface PeriPeriConfig {
 	baseUrl: string;
@@ -12,6 +23,9 @@ export interface PeriPeriConfig {
 	agentId: string;
 	sessionId: string;
 	presetName: string;
+	model: string;
+	effectiveModel: string;
+	providerId: string;
 }
 
 interface EnvEndpoint {
@@ -75,24 +89,63 @@ async function readWorkspaceEnv(): Promise<EnvEndpoint[]> {
 	}
 }
 
+function inferProvider(model: string): string {
+	if (/^(bedrock\/|amazon\.|anthropic\.|global\.anthropic\.|us\.anthropic\.|eu\.anthropic\.|au\.anthropic\.|jp\.anthropic\.)/.test(model)) {
+		return 'Aws-Bedrock';
+	}
+
+	return 'OpenAI';
+}
+
+function normalizeModel(providerId: string, inputModel: string): string {
+	let rawModel = inputModel.trim();
+
+	if (rawModel.startsWith('bedrock/')) {
+		rawModel = rawModel.slice('bedrock/'.length);
+	}
+
+	const alreadyScopedAnthropic = /^(global|us|eu|au|jp)\.anthropic\./.test(rawModel);
+
+	if (
+		providerId === 'Aws-Bedrock' &&
+		rawModel.startsWith('anthropic.claude-') &&
+		!alreadyScopedAnthropic &&
+		PROFILE_REQUIRED_ANTHROPIC_MODELS.has(rawModel)
+	) {
+		rawModel = `global.${rawModel}`;
+	}
+
+	if (providerId === 'Aws-Bedrock') {
+		return `bedrock/${rawModel}`;
+	}
+
+	return rawModel;
+}
+
 export async function loadConfig(): Promise<PeriPeriConfig> {
 	const settings = vscode.workspace.getConfiguration('periPeri');
 	const settingsApiKey = settings.get<string>('apiKey', '').trim();
 	const settingsUserId = settings.get<string>('userId', '').trim();
 	const settingsAgentId = settings.get<string>('agentId', '').trim();
 	const settingsSessionId = settings.get<string>('sessionId', '').trim();
-	const settingsBaseUrl = settings.get<string>('baseUrl', 'https://agent-prod.studio.lyzr.ai').trim();
+	const settingsBaseUrl = settings.get<string>('baseUrl', DEFAULT_BASE_URL).trim();
 	const settingsPresetName = settings.get<string>('presetName', '').trim();
+	const settingsModel = settings.get<string>('model', DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+	const providerId = inferProvider(settingsModel);
+	const effectiveModel = normalizeModel(providerId, settingsModel);
 
 	// Explicit VS Code settings take priority
 	if (settingsApiKey && settingsUserId) {
 		return {
-			baseUrl: settingsBaseUrl || 'https://agent-prod.studio.lyzr.ai',
+			baseUrl: settingsBaseUrl || DEFAULT_BASE_URL,
 			apiKey: settingsApiKey,
 			userId: settingsUserId,
 			agentId: settingsAgentId,
 			sessionId: settingsSessionId,
 			presetName: '',
+			model: settingsModel,
+			effectiveModel,
+			providerId,
 		};
 	}
 
@@ -108,27 +161,33 @@ export async function loadConfig(): Promise<PeriPeriConfig> {
 			try {
 				derivedBase = new URL(preset.url).origin;
 			} catch {
-				derivedBase = 'https://agent-prod.studio.lyzr.ai';
+				derivedBase = DEFAULT_BASE_URL;
 			}
 		}
 
 		return {
-			baseUrl: derivedBase || 'https://agent-prod.studio.lyzr.ai',
+			baseUrl: derivedBase || DEFAULT_BASE_URL,
 			apiKey: preset.apiKey,
 			userId: preset.userId,
 			agentId: settingsAgentId || preset.agentId,
 			sessionId: settingsSessionId || preset.sessionId,
 			presetName: preset.name,
+			model: settingsModel,
+			effectiveModel,
+			providerId,
 		};
 	}
 
 	// No credentials found
 	return {
-		baseUrl: settingsBaseUrl || 'https://agent-prod.studio.lyzr.ai',
+		baseUrl: settingsBaseUrl || DEFAULT_BASE_URL,
 		apiKey: '',
 		userId: '',
 		agentId: settingsAgentId,
 		sessionId: settingsSessionId,
 		presetName: '',
+		model: settingsModel,
+		effectiveModel,
+		providerId,
 	};
 }
