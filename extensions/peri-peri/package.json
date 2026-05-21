@@ -1,0 +1,94 @@
+{
+	"name": "peri-peri",
+	"displayName": "Peri Peri",
+	"description": "Chat participant powered by Lyzr AI inference backend",
+	"publisher": "intrix",
+	"license": "MIT",
+	"version": "0.0.1",
+	"engines": {
+		"vscode": "^1.93.0"
+	},
+	"categories": [
+		"Chat"
+	],
+	"activationEvents": [],
+	"main": "./out/extension.js",
+	"capabilities": {
+		"virtualWorkspaces": true,
+		"untrustedWorkspaces": {
+			"supported": true
+		}
+	},
+	"contributes": {
+		"chatParticipants": [
+			{
+				"id": "intrix.peri-peri",
+				"fullName": "Peri Peri",
+				"name": "peri-peri",
+				"description": "AI assistant powered by Lyzr inference (AWS Bedrock Claude Sonnet)",
+				"isSticky": true,
+				"commands": [
+					{
+						"name": "explain",
+						"description": "Explain the selected code"
+					},
+					{
+						"name": "fix",
+						"description": "Find and fix bugs in the code"
+					},
+					{
+						"name": "optimize",
+						"description": "Optimize code for performance"
+					}
+				]
+			}
+		],
+		"configuration": {
+			"title": "Peri Peri",
+			"properties": {
+				"periPeri.apiKey": {
+					"type": "string",
+					"default": "",
+					"description": "Lyzr API key (x-api-key header value)"
+				},
+				"periPeri.userId": {
+					"type": "string",
+					"default": "",
+					"description": "Lyzr user ID (email)"
+				},
+				"periPeri.agentId": {
+					"type": "string",
+					"default": "",
+					"description": "Lyzr agent ID (optional — auto-creates if empty)"
+				},
+				"periPeri.sessionId": {
+					"type": "string",
+					"default": "",
+					"description": "Lyzr session ID (optional — auto-generates if empty)"
+				},
+				"periPeri.baseUrl": {
+					"type": "string",
+					"default": "https://agent-prod.studio.lyzr.ai",
+					"description": "Lyzr API base URL"
+				},
+				"periPeri.presetName": {
+					"type": "string",
+					"default": "",
+					"description": "Name of the agent preset to use from workspace .env file"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "gulp compile-extension:peri-peri",
+		"watch": "gulp watch-extension:peri-peri"
+	},
+	"devDependencies": {
+		"@types/node": "22.x"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/microsoft/vscode.git"
+	}
+}
