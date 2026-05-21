@@ -100,6 +100,7 @@ export function parseActions(text: string): {
 		parseReplaceInFile(block, actions);
 		parseListDir(block, actions);
 		parseRunShell(block, actions);
+		parseRunInTerminal(block, actions);
 		parseVscodeCommand(block, actions);
 		parseOpenBrowser(block, actions);
 	}
@@ -112,6 +113,7 @@ export function parseActions(text: string): {
 		parseReplaceInFile(cleaned, actions);
 		parseListDir(cleaned, actions);
 		parseRunShell(cleaned, actions);
+		parseRunInTerminal(cleaned, actions);
 		parseVscodeCommand(cleaned, actions);
 		parseOpenBrowser(cleaned, actions);
 	}
@@ -133,6 +135,7 @@ export function parseActions(text: string): {
 			.replace(/<read_file\s+path="[^"]+"\s*\/>/g, '')
 			.replace(/<list_dir\s+path="[^"]+"\s*\/>/g, '')
 			.replace(/<run_shell>[\s\S]*?<\/run_shell>/g, '')
+			.replace(/<run_in_terminal[\s\S]*?<\/run_in_terminal>/g, '')
 			.replace(/<replace_in_file[\s\S]*?<\/replace_in_file>/g, '')
 			.replace(/<vscode_command\s+name="[^"]+"\s*\/>/g, '')
 			.replace(/<open_browser\s+url="[^"]+"\s*\/>/g, '');
@@ -271,6 +274,22 @@ function parseOpenBrowser(block: string, actions: ParsedAction[]): void {
 	}
 }
 
+function parseRunInTerminal(block: string, actions: ParsedAction[]): void {
+	const pattern = /<run_in_terminal(?:\s+name="([^"]*)")?>([\s\S]*?)<\/run_in_terminal>/g;
+	let m;
+	while ((m = pattern.exec(block)) !== null) {
+		const name = m[1] || '';
+		const inner = m[2];
+		const cdataMatch = /^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/.exec(inner);
+		const command = cdataMatch
+			? stripWrapperNewlines(cdataMatch[1]).trim()
+			: stripWrapperNewlines(inner).trim();
+		if (command) {
+			actions.push({ type: 'run_in_terminal', args: { command, name } });
+		}
+	}
+}
+
 /**
  * Execute a parsed action.
  */
@@ -291,6 +310,8 @@ export async function executeAction(
 				return await execListDir(action.args);
 			case 'run_shell':
 				return await execRunShell(action.args, stream, token);
+			case 'run_in_terminal':
+				return await execRunInTerminal(action.args, stream);
 			case 'vscode_command':
 				return await execVscodeCommand(action.args, stream);
 			case 'open_browser':
@@ -579,4 +600,24 @@ async function execOpenBrowser(args: Record<string, any>, stream: vscode.ChatRes
 		}
 	}
 	return { tool: 'open_browser', success: true, output: `Opened: ${url}` };
+}
+
+
+async function execRunInTerminal(args: Record<string, any>, stream: vscode.ChatResponseStream): Promise<ToolResult> {
+	let cmd: string = typeof args.command === 'string' ? args.command : '';
+	cmd = cmd.replace(/\r?\n/g, ' && ').trim();
+	if (!cmd) {
+		return { tool: 'run_in_terminal', success: false, output: 'Empty command.' };
+	}
+
+	const name = typeof args.name === 'string' ? args.name : 'Peri Peri';
+	const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+	stream.markdown(`\n🖥️ Terminal: \`${cmd}\`\n`);
+
+	const terminal = vscode.window.createTerminal({ name, cwd });
+	terminal.show(false);
+	terminal.sendText(cmd);
+
+	return { tool: 'run_in_terminal', success: true, output: `Started in terminal "${name}": ${cmd}` };
 }

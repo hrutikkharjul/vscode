@@ -197,6 +197,7 @@ const INLINE_TOOL_SCHEMA = `You have these tools. Output ALL tool calls needed i
 <read_file path="file" />
 <list_dir path="." />
 <run_shell><![CDATA[command]]></run_shell>
+<run_in_terminal name="optional label"><![CDATA[command]]></run_in_terminal>
 <replace_in_file path="file"><search><![CDATA[old]]></search><replace><![CDATA[new]]></replace></replace_in_file>
 <open_browser url="https://..." />
 <vscode_command name="command.id" />
@@ -208,7 +209,8 @@ Rules:
 - Use RELATIVE paths (e.g. "notes-app/src/App.js") not absolute paths
 - NEVER put backslash-n in paths. Use forward slashes: notes-app/src/App.js
 - If a tool call FAILS, read the error, diagnose the problem, and try a DIFFERENT approach. Do NOT retry the same command more than once.
-- For long-running commands (npm start, dev servers), background them: "start /B cmd" on Windows
+- Use run_in_terminal for long-running processes (npm start, dev servers, watchers) — they run in VS Code's integrated terminal and stay alive
+- Use run_shell for short commands that finish quickly (mkdir, npm install, dir)
 - You MUST output an <actions> block. Do NOT just describe what you will do. ACT.`;
 
 /**
