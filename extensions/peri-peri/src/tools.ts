@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Intrix Solutions. All rights reserved.
- *  Licensed under the MIT License.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
@@ -36,35 +36,35 @@ Action reference:
 - read_file:       <read_file path="file" />
 - write_file:      <write_file path="file"><![CDATA[full file contents]]></write_file>
 - replace_in_file: <replace_in_file path="file">
-                     <search><![CDATA[exact text from the file, including indentation]]></search>
-                     <replace><![CDATA[new text]]></replace>
-                   </replace_in_file>
+	<search><![CDATA[exact text from the file, including indentation]]></search>
+	<replace><![CDATA[new text]]></replace>
+	</replace_in_file>
 - list_dir:        <list_dir path="." />
 - run_shell:       <run_shell><![CDATA[command]]></run_shell>
-                   Runs in the OS default shell (cmd.exe on Windows, /bin/sh on
-                   POSIX) with stdout+stderr captured and returned to you, plus
-                   the exit code — so iterate based on the actual output. 60s
-                   timeout. For long-running processes (dev servers, watchers)
-                   that should keep running, background them: "start /B ..." on
-                   Windows, "... &" on POSIX.
+	Runs in the OS default shell (cmd.exe on Windows, /bin/sh on
+	POSIX) with stdout+stderr captured and returned to you, plus
+	the exit code - so iterate based on the actual output. 60s
+	timeout. For long-running processes (dev servers, watchers)
+	that should keep running, background them: "start /B ..." on
+	Windows, "... &" on POSIX.
 - vscode_command:  <vscode_command name="command.id" />
 - open_browser:    <open_browser url="https://example.com" />
 
 Notes on replace_in_file:
 - The <search> block must match a UNIQUE region of the file. Only the first
-  occurrence is replaced.
+	occurrence is replaced.
 - Whitespace and indentation must match the file exactly (read_file first if
-  unsure). The runtime auto-normalises CRLF vs LF, so don't worry about that.
+	unsure). The runtime auto-normalises CRLF vs LF, so don't worry about that.
 - For brand-new files, use write_file. For broad rewrites of an existing file,
-  prefer write_file with the full new contents over many replace_in_file calls.
+	prefer write_file with the full new contents over many replace_in_file calls.
 
 Example:
 <actions>
-  <write_file path="index.html"><![CDATA[
+	<write_file path="index.html"><![CDATA[
 <!DOCTYPE html>
 <html><body><h1>Hello</h1></body></html>
-  ]]></write_file>
-  <open_browser url="index.html" />
+	]]></write_file>
+	<open_browser url="index.html" />
 </actions>
 
 IMPORTANT: Always wrap your tool uses in <actions>...</actions> tags.
@@ -307,11 +307,24 @@ export async function executeAction(
 // --- Implementations ---
 
 function resolvePath(p: string): string {
-	if (path.isAbsolute(p)) {
-		return p;
+	const rawPath = typeof p === 'string' ? p.trim() : String(p ?? '').trim();
+	if (!rawPath) {
+		throw new Error('Empty path. Provide a workspace-relative or absolute path.');
+	}
+	if (/[\r\n\t]/.test(rawPath)) {
+		const escapedPath = rawPath
+			.replace(/\r/g, '\\r')
+			.replace(/\n/g, '\\n')
+			.replace(/\t/g, '\\t');
+		throw new Error(`Malformed path "${escapedPath}". Use forward slashes (for example C:/Users/...) or a workspace-relative path; raw backslashes can be mangled into escapes like \\t.`);
+	}
+
+	const normalizedPath = path.normalize(rawPath);
+	if (path.isAbsolute(normalizedPath)) {
+		return normalizedPath;
 	}
 	const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-	return path.join(root, p);
+	return path.join(root, normalizedPath);
 }
 
 async function execReadFile(args: Record<string, any>): Promise<ToolResult> {
@@ -345,8 +358,7 @@ async function execWriteFile(args: Record<string, any>, stream: vscode.ChatRespo
 	await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
 
 	const verb = existed ? 'Updated' : 'Created';
-	const icon = existed ? '✏️' : '📝';
-	stream.markdown(`\n${icon} ${verb}: \`${args.path}\`\n`);
+	stream.markdown(`\n${verb}: \`${args.path}\`\n`);
 	return { tool: 'write_file', success: true, output: `${verb}: ${filePath} (${content.length} chars)` };
 }
 
@@ -429,7 +441,7 @@ async function execReplaceInFile(args: Record<string, any>, stream: vscode.ChatR
 	}
 
 	await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(updated));
-	stream.markdown(`\n✏️ Edited: \`${args.path}\`\n`);
+	stream.markdown(`\nEdited: \`${args.path}\`\n`);
 	const note = matchStrategy === 'eol-normalized' ? ' (matched after EOL normalisation)' : '';
 	return { tool: 'replace_in_file', success: true, output: `Replaced in ${filePath}${note}` };
 }
@@ -438,7 +450,7 @@ async function execListDir(args: Record<string, any>): Promise<ToolResult> {
 	const dirPath = resolvePath(args.path);
 	const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(dirPath));
 	const lines = entries.map(([name, type]) =>
-		`${type === vscode.FileType.Directory ? '📁' : '📄'} ${name}`
+		`${type === vscode.FileType.Directory ? '[dir]' : '[file]'} ${name}`
 	);
 	return { tool: 'list_dir', success: true, output: lines.join('\n') };
 }
@@ -454,7 +466,7 @@ async function execRunShell(
 	}
 
 	const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-	stream.markdown(`\n⚡ Running: \`${cmd}\`\n`);
+	stream.markdown(`\nRunning: \`${cmd}\`\n`);
 
 	return await new Promise<ToolResult>((resolve) => {
 		// shell:true uses the OS default shell — cmd.exe on Windows (process.env.ComSpec),
@@ -503,7 +515,7 @@ async function execRunShell(
 			clearTimeout(timer);
 			cancelDisposable?.dispose();
 			const msg = `Failed to start: ${err.message}`;
-			stream.markdown(`\n❌ ${msg}\n`);
+			stream.markdown(`\nError: ${msg}\n`);
 			resolve({ tool: 'run_shell', success: false, output: msg });
 		});
 
@@ -526,18 +538,18 @@ async function execRunShell(
 			let status: string;
 			let success = false;
 			if (cancelled) {
-				status = '⏹️ Cancelled';
+				status = 'Cancelled';
 			} else if (timedOut) {
-				status = `⏱️ Timed out after ${RUN_SHELL_TIMEOUT_MS / 1000}s`;
+				status = `Timed out after ${RUN_SHELL_TIMEOUT_MS / 1000}s`;
 			} else if (code === 0) {
-				status = '✅ Exit 0';
+				status = 'Exit 0';
 				success = true;
 			} else if (code !== null) {
-				status = `❌ Exit ${code}`;
+				status = `Exit ${code}`;
 			} else if (signal) {
-				status = `❌ Signal ${signal}`;
+				status = `Signal ${signal}`;
 			} else {
-				status = '❌ Unknown exit';
+				status = 'Unknown exit';
 			}
 			stream.markdown(`\n${status}\n`);
 
@@ -556,14 +568,14 @@ async function execRunShell(
 
 async function execVscodeCommand(args: Record<string, any>, stream: vscode.ChatResponseStream): Promise<ToolResult> {
 	const cmd = args.command;
-	stream.markdown(`\n🔧 VS Code: \`${cmd}\`\n`);
+	stream.markdown(`\nVS Code: \`${cmd}\`\n`);
 	await vscode.commands.executeCommand(cmd);
 	return { tool: 'vscode_command', success: true, output: `Executed: ${cmd}` };
 }
 
 async function execOpenBrowser(args: Record<string, any>, stream: vscode.ChatResponseStream): Promise<ToolResult> {
 	const url = args.url;
-	stream.markdown(`\n🌐 Opening: [${url}](${url})\n`);
+	stream.markdown(`\nOpening: [${url}](${url})\n`);
 	try {
 		await vscode.commands.executeCommand('simpleBrowser.api.open', url, { viewColumn: vscode.ViewColumn.Beside });
 	} catch {

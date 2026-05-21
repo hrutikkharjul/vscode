@@ -172,7 +172,7 @@ function truncate(s: string, max: number): string {
  * The tool schema block included in every message to the model.
  * Must be concise — verbose instructions trigger Claude's injection detection.
  */
-const INLINE_TOOL_SCHEMA = `You have these tools. Output ALL tool calls needed inside a single <actions> block:
+const INLINE_TOOL_SCHEMA = `You have these tools. Output the tool calls for your current step inside a single <actions> block:
 
 <write_file path="file"><![CDATA[content]]></write_file>
 <read_file path="file" />
@@ -183,10 +183,81 @@ const INLINE_TOOL_SCHEMA = `You have these tools. Output ALL tool calls needed i
 <vscode_command name="command.id" />
 
 Rules:
-- Wrap ALL tool calls in a single <actions>...</actions> block
-- Include ALL files needed for the task in ONE response — do NOT stop after one file
+- Each response may contain at most one <actions>...</actions> block
+- Do only the work needed for the user's actual request; do not scaffold unrelated files or project structure
 - Use Windows cmd.exe commands (dir, type, mkdir, del) not Unix
-- Do NOT emit <done/> — the system handles completion automatically`;
+- For Windows paths in XML attributes or shell commands, prefer forward slashes (C:/Users/...) or workspace-relative paths; raw backslashes can be mangled into escapes like \\t
+- Emit <done/> when the task is complete`;
+
+function formatToolResultOutput(output: string): string {
+	if (output.length <= MAX_RESULT_BYTES_PER_TOOL) {
+		return output;
+	}
+	return `${output.slice(0, MAX_RESULT_BYTES_PER_TOOL)}\n...[truncated]`;
+}
+
+function formatToolResultsStep(results: ReadonlyArray<ToolResult>, stepNumber: number): string {
+	const formattedResults = results.map(result => {
+		const output = formatToolResultOutput(result.output);
+		return `Tool: ${result.tool}\nStatus: ${result.success ? 'success' : 'FAILED'}\nOutput:\n${output}`;
+	});
+
+	return `Step ${stepNumber}:\n${formattedResults.join('\n\n')}`;
+}
+
+function buildRecentResultsBlock(entries: ReadonlyArray<string>): string {
+	let totalLength = 0;
+	const keptEntries: string[] = [];
+
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		const separatorLength = keptEntries.length === 0 ? 0 : 2;
+		if (keptEntries.length > 0 && totalLength + separatorLength + entry.length > MAX_CONTINUATION_BYTES) {
+			break;
+		}
+
+		if (keptEntries.length === 0 && entry.length > MAX_CONTINUATION_BYTES) {
+			keptEntries.unshift(`${truncate(entry, MAX_CONTINUATION_BYTES - 16)}\n...[truncated]`);
+			totalLength = keptEntries[0].length;
+			break;
+		}
+
+		keptEntries.unshift(entry);
+		totalLength += separatorLength + entry.length;
+	}
+
+	const body = keptEntries.join('\n\n');
+	return keptEntries.length < entries.length ? `...[earlier steps omitted]\n\n${body}` : body;
+}
+
+function buildTaskContextBlock(originalTask: string, allPriorResults: ReadonlyArray<string>): string {
+	if (allPriorResults.length === 0) {
+		return `Original task: ${originalTask}`;
+	}
+
+	return `Original task: ${originalTask}\n\nRecent tool results:\n${buildRecentResultsBlock(allPriorResults)}`;
+}
+
+function buildNoActionNudgeMessage(originalTask: string, allPriorResults: ReadonlyArray<string>, nudgeCount: number): string {
+	const instruction = nudgeCount === 1
+		? 'Your previous reply did not include an <actions> block or <done/>. Continue from the task and tool results below. If more work is needed, output the next <actions> block. If the task is complete, output <done/>.'
+		: 'Your previous reply still omitted <actions> and <done/>. Continue from the task and tool results below, then output either the next <actions> block or <done/>.';
+
+	return `${INLINE_TOOL_SCHEMA}\n\n${buildTaskContextBlock(originalTask, allPriorResults)}\n\n${instruction}\n\n<actions>`;
+}
+
+function buildInitialMessage(userRequest: string, contextBlocks: ReadonlyArray<string>): string {
+	const sections = [INLINE_TOOL_SCHEMA];
+	for (const block of contextBlocks) {
+		if (block) {
+			sections.push(block);
+		}
+	}
+	sections.push(`Task: ${userRequest}`);
+	sections.push('Do only the work needed for this task. Modify existing files when appropriate instead of scaffolding unrelated project structure. If the task is complete after your work, emit <done/>.');
+	sections.push('<actions>');
+	return sections.join('\n\n');
+}
 
 /**
  * Format tool results into a continuation message. Each call is stateless
@@ -199,30 +270,13 @@ function buildContinuationMessage(
 	originalTask: string,
 	allPriorResults: string[],
 ): string {
-	// Format latest results
-	const latestResults = results.map(r => {
-		const body = r.output.length > MAX_RESULT_BYTES_PER_TOOL
-			? `${r.output.slice(0, MAX_RESULT_BYTES_PER_TOOL)}\n…[truncated]`
-			: r.output;
-		return `- ${r.tool}: ${r.success ? 'success' : 'FAILED'} — ${body.split('\n')[0]}`;
-	});
-
-	// Build accumulated history of completed steps (capped)
-	const newEntries = latestResults;
-	allPriorResults.push(...newEntries);
-	let stepsBlock = allPriorResults.join('\n');
-	if (stepsBlock.length > MAX_CONTINUATION_BYTES) {
-		stepsBlock = `…[earlier steps omitted]\n${allPriorResults.slice(-5).join('\n')}`;
-	}
+	allPriorResults.push(formatToolResultsStep(results, stepNumber));
 
 	return `${INLINE_TOOL_SCHEMA}
 
-Original task: ${originalTask}
+${buildTaskContextBlock(originalTask, allPriorResults)}
 
-Steps completed so far (${stepNumber}):
-${stepsBlock}
-
-Continue working. Output your next <actions> block with ALL remaining work:
+Continue from the tool results above. Do only the remaining work for the user's request. If the task is complete, output <done/>. Otherwise output your next <actions> block:
 
 <actions>`;
 }
@@ -297,7 +351,7 @@ async function runMultistepLoop(
 				vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(process.cwd()),
 				'.peri-peri-log.txt'
 			);
-			const logEntry = `\n${'='.repeat(60)}\n[${new Date().toISOString()}] Step ${state.stepsSoFar + 1}\nSENT (${message.length} chars): ${message.slice(0, 500)}...\nRECEIVED (${responseText.length} chars):\n${responseText}\n`;
+			const logEntry = `\n${'='.repeat(60)}\n[${new Date().toISOString()}] Step ${state.stepsSoFar + 1}\nAgent: ${agentId}\nCall Session: ${callSessionId}\nBase URL: ${config.baseUrl}\nProvider: ${config.providerId}\nInput Model: ${config.model}\nEffective Model: ${config.effectiveModel}\nSENT (${message.length} chars): ${message.slice(0, 500)}...\nRECEIVED (${responseText.length} chars):\n${responseText}\n`;
 			try {
 				let existing = '';
 				try { existing = new TextDecoder().decode(await vscode.workspace.fs.readFile(logUri)); } catch { /* new file */ }
@@ -340,11 +394,7 @@ async function runMultistepLoop(
 			consecutiveNoActions++;
 			outputChannel.appendLine(`\n--- NO ACTIONS (nudge ${consecutiveNoActions}/${MAX_NO_ACTION_NUDGES}, done=${done}) ---`);
 			if (consecutiveNoActions <= MAX_NO_ACTION_NUDGES) {
-				if (consecutiveNoActions === 1) {
-					message = `You did not output any <actions> block. Please use your tools to make progress on the task. For example:\n<actions>\n  <list_dir path="." />\n</actions>`;
-				} else {
-					message = `Please output an <actions> block now, or <done/> if the task is complete.`;
-				}
+				message = buildNoActionNudgeMessage(state.originalTask, state.allPriorResults, consecutiveNoActions);
 				continue;
 			}
 			return { result: { stoppedReason: 'no-actions', stepsSoFar: state.stepsSoFar, totalActionsRun: state.totalActionsRun }, nextContinuationMessage: message };
@@ -498,10 +548,16 @@ function finaliseResult(
 			);
 			break;
 		}
-		case 'no-actions':
 		case 'done':
-			// Model finished cleanly; nothing extra to render — its own summary
-			// (or a short <done/> message) was already streamed above.
+			stream.markdown(
+				`\n\n**Completed** after ${result.stepsSoFar} tool step${result.stepsSoFar === 1 ? '' : 's'} ` +
+				`(${result.totalActionsRun} action${result.totalActionsRun === 1 ? '' : 's'} executed).`
+			);
+			break;
+		case 'no-actions':
+			stream.markdown(
+				`\n\n**Stopped** after ${result.stepsSoFar} tool step${result.stepsSoFar === 1 ? '' : 's'} because the model stopped producing actions.`
+			);
 			break;
 		case 'repeated-action':
 			// The warning was already streamed inside the loop.
@@ -650,13 +706,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		// Build initial message with inline tool schema (proven to work via API testing).
 		// Each API call uses a FRESH session ID because Claude rejects tool_results
 		// in the same session as "fabricated". Stateless approach works reliably.
-		const initialMessage = `${INLINE_TOOL_SCHEMA}
-${historyBlock ? '\n' + historyBlock + '\n' : ''}${editorBlock ? '\n' + editorBlock + '\n' : ''}${fileContext ? '\n' + fileContext + '\n' : ''}
-Task: ${userRequest}
-
-Create ALL necessary files in a single <actions> block. Do not use create-react-app or any scaffolding tools — write the files directly.
-
-<actions>`;
+		const initialMessage = buildInitialMessage(userRequest, [historyBlock, editorBlock, fileContext]);
 
 		const state = {
 			stepsSoFar: 0,
