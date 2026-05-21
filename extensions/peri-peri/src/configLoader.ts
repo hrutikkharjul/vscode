@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 
 const DEFAULT_BASE_URL = 'https://agent-prod.studio.lyzr.ai';
-const DEFAULT_MODEL = 'gpt-5';
+const DEFAULT_MODEL = 'anthropic.claude-opus-4-6-v1';
 
 const PROFILE_REQUIRED_ANTHROPIC_MODELS = new Set([
 	'anthropic.claude-sonnet-4-6',
