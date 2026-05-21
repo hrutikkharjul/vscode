@@ -5,12 +5,23 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as childProcess from 'child_process';
 
 export interface ToolResult {
 	tool: string;
 	success: boolean;
 	output: string;
 }
+
+// run_shell tuning. The shell tool captures stdout+stderr from the spawned
+// process so the model can see what actually happened. To keep the chat and the
+// continuation message bounded:
+//   - RUN_SHELL_TIMEOUT_MS:        kill long-running commands (dev servers etc.).
+//   - RUN_SHELL_MAX_DISPLAY_BYTES: cap on what we print into the chat panel.
+//   - RUN_SHELL_MAX_OUTPUT_BYTES:  cap on what we hand back to the model.
+const RUN_SHELL_TIMEOUT_MS = 60_000;
+const RUN_SHELL_MAX_DISPLAY_BYTES = 4000;
+const RUN_SHELL_MAX_OUTPUT_BYTES = 8000;
 
 /**
  * Tool schema in the XML action format that peri-peri/Lyzr models understand.
@@ -30,6 +41,12 @@ Action reference:
                    </replace_in_file>
 - list_dir:        <list_dir path="." />
 - run_shell:       <run_shell><![CDATA[command]]></run_shell>
+                   Runs in the OS default shell (cmd.exe on Windows, /bin/sh on
+                   POSIX) with stdout+stderr captured and returned to you, plus
+                   the exit code — so iterate based on the actual output. 60s
+                   timeout. For long-running processes (dev servers, watchers)
+                   that should keep running, background them: "start /B ..." on
+                   Windows, "... &" on POSIX.
 - vscode_command:  <vscode_command name="command.id" />
 - open_browser:    <open_browser url="https://example.com" />
 
@@ -230,7 +247,11 @@ function parseOpenBrowser(block: string, actions: ParsedAction[]): void {
 /**
  * Execute a parsed action.
  */
-export async function executeAction(action: ParsedAction, stream: vscode.ChatResponseStream): Promise<ToolResult> {
+export async function executeAction(
+	action: ParsedAction,
+	stream: vscode.ChatResponseStream,
+	token?: vscode.CancellationToken,
+): Promise<ToolResult> {
 	try {
 		switch (action.type) {
 			case 'read_file':
@@ -242,7 +263,7 @@ export async function executeAction(action: ParsedAction, stream: vscode.ChatRes
 			case 'list_dir':
 				return await execListDir(action.args);
 			case 'run_shell':
-				return await execRunShell(action.args, stream);
+				return await execRunShell(action.args, stream, token);
 			case 'vscode_command':
 				return await execVscodeCommand(action.args, stream);
 			case 'open_browser':
@@ -395,16 +416,115 @@ async function execListDir(args: Record<string, any>): Promise<ToolResult> {
 	return { tool: 'list_dir', success: true, output: lines.join('\n') };
 }
 
-async function execRunShell(args: Record<string, any>, stream: vscode.ChatResponseStream): Promise<ToolResult> {
-	const cmd = args.command;
+async function execRunShell(
+	args: Record<string, any>,
+	stream: vscode.ChatResponseStream,
+	token: vscode.CancellationToken | undefined,
+): Promise<ToolResult> {
+	const cmd: string = typeof args.command === 'string' ? args.command : '';
+	if (!cmd.trim()) {
+		return { tool: 'run_shell', success: false, output: 'Empty command.' };
+	}
+
+	const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	stream.markdown(`\n⚡ Running: \`${cmd}\`\n`);
-	const terminal = vscode.window.createTerminal({
-		name: 'Peri Peri',
-		cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+
+	return await new Promise<ToolResult>((resolve) => {
+		// shell:true uses the OS default shell — cmd.exe on Windows (process.env.ComSpec),
+		// /bin/sh on POSIX. windowsHide:true keeps a console window from flashing on Win.
+		const child = childProcess.spawn(cmd, [], {
+			cwd,
+			shell: true,
+			windowsHide: true,
+		});
+
+		// On Windows, child.kill() only signals the shell wrapper — to actually
+		// stop the spawned tree we need taskkill /T /F. On POSIX SIGKILL on the
+		// shell child propagates to the group via shell:true semantics.
+		const killTree = () => {
+			if (!child.pid) {
+				return;
+			}
+			if (process.platform === 'win32') {
+				try {
+					childProcess.execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore', windowsHide: true });
+				} catch { /* already exited */ }
+			} else {
+				try { child.kill('SIGKILL'); } catch { /* already exited */ }
+			}
+		};
+
+		let stdout = '';
+		let stderr = '';
+		let timedOut = false;
+		let cancelled = false;
+
+		const timer = setTimeout(() => {
+			timedOut = true;
+			killTree();
+		}, RUN_SHELL_TIMEOUT_MS);
+
+		const cancelDisposable = token?.onCancellationRequested(() => {
+			cancelled = true;
+			killTree();
+		});
+
+		child.stdout?.on('data', (d) => { stdout += d.toString(); });
+		child.stderr?.on('data', (d) => { stderr += d.toString(); });
+
+		child.on('error', (err) => {
+			clearTimeout(timer);
+			cancelDisposable?.dispose();
+			const msg = `Failed to start: ${err.message}`;
+			stream.markdown(`\n❌ ${msg}\n`);
+			resolve({ tool: 'run_shell', success: false, output: msg });
+		});
+
+		child.on('close', (code, signal) => {
+			clearTimeout(timer);
+			cancelDisposable?.dispose();
+
+			const combinedRaw = stderr
+				? `${stdout}${stdout && !stdout.endsWith('\n') ? '\n' : ''}[stderr]\n${stderr}`
+				: stdout;
+			const combined = combinedRaw.replace(/\r\n/g, '\n').replace(/\u001b\[[0-9;]*m/g, '').trimEnd();
+
+			const display = combined.length > RUN_SHELL_MAX_DISPLAY_BYTES
+				? `${combined.slice(0, RUN_SHELL_MAX_DISPLAY_BYTES)}\n…[truncated ${combined.length - RUN_SHELL_MAX_DISPLAY_BYTES} chars]`
+				: combined;
+			if (display) {
+				stream.markdown(`\n\`\`\`\n${display}\n\`\`\`\n`);
+			}
+
+			let status: string;
+			let success = false;
+			if (cancelled) {
+				status = '⏹️ Cancelled';
+			} else if (timedOut) {
+				status = `⏱️ Timed out after ${RUN_SHELL_TIMEOUT_MS / 1000}s`;
+			} else if (code === 0) {
+				status = '✅ Exit 0';
+				success = true;
+			} else if (code !== null) {
+				status = `❌ Exit ${code}`;
+			} else if (signal) {
+				status = `❌ Signal ${signal}`;
+			} else {
+				status = '❌ Unknown exit';
+			}
+			stream.markdown(`\n${status}\n`);
+
+			const modelOutput = combined.length > RUN_SHELL_MAX_OUTPUT_BYTES
+				? `${combined.slice(0, RUN_SHELL_MAX_OUTPUT_BYTES)}\n…[truncated ${combined.length - RUN_SHELL_MAX_OUTPUT_BYTES} chars]`
+				: combined;
+
+			resolve({
+				tool: 'run_shell',
+				success,
+				output: modelOutput ? `${status}\n${modelOutput}` : status,
+			});
+		});
 	});
-	terminal.show();
-	terminal.sendText(cmd);
-	return { tool: 'run_shell', success: true, output: `Sent to terminal: ${cmd}` };
 }
 
 async function execVscodeCommand(args: Record<string, any>, stream: vscode.ChatResponseStream): Promise<ToolResult> {

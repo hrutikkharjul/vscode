@@ -21,13 +21,16 @@ const PARTICIPANT_ID = 'intrix.peri-peri';
 // still enforced by:
 //   1. MAX_REPEATED_ACTION_REPEATS    — break out if the model emits the exact
 //                                       same action this many times (likely stuck).
-//   2. MAX_RESULT_BYTES_PER_TOOL     — per-tool output cap to keep messages small.
-//   3. MAX_CONTINUATION_BYTES         — overall cap on the continuation message
+//   2. MAX_NO_ACTION_NUDGES            — break out if the model keeps responding
+//                                       with prose only and never emits <done/>.
+//   3. MAX_RESULT_BYTES_PER_TOOL     — per-tool output cap to keep messages small.
+//   4. MAX_CONTINUATION_BYTES         — overall cap on the continuation message
 //                                       sent back to the model after each step.
-//   4. An explicit <done/> tag the model can emit to finish cleanly.
-//   5. The chat-turn cancellation token (Esc / cancel button).
+//   5. An explicit <done/> tag the model can emit to finish cleanly.
+//   6. The chat-turn cancellation token (Esc / cancel button).
 const DEFAULT_CHECKPOINT_INTERVAL = 25;
 const MAX_REPEATED_ACTION_REPEATS = 3;
+const MAX_NO_ACTION_NUDGES = 1;
 const MAX_RESULT_BYTES_PER_TOOL = 4000;
 const MAX_CONTINUATION_BYTES = 24_000;
 
@@ -173,7 +176,7 @@ function buildContinuationMessage(results: ReadonlyArray<ToolResult>, stepNumber
 		joined = `<tool_result note="older results omitted to fit context" />\n${blocks.join('\n')}`;
 	}
 
-	return `${joined}\n\nStep ${stepNumber} complete. Continue if more work is needed (output another <actions> block). When the user's request is fully satisfied, emit <done/> and a brief summary instead of more actions.`;
+	return `${joined}\n\nStep ${stepNumber} complete. The user's original request from <user_request> is NOT yet fulfilled until you emit <done/>. Continue immediately with another <actions> block to make progress on the NEXT concrete step. Do NOT ask the user clarifying questions. Do NOT propose options and wait — pick the most reasonable interpretation and act. The only acceptable terminations are: more <actions>, or <done/> when the request is fully implemented and verified.`;
 }
 
 function getCheckpointInterval(): number {
@@ -209,6 +212,7 @@ async function runMultistepLoop(
 
 	let message = initialMessage;
 	let loop = 0; // iterations completed *in this invocation*
+	let consecutiveNoActions = 0; // counts how many times in a row the model sent prose without <actions>/<done/>
 
 	while (true) {
 		if (token.isCancellationRequested) {
@@ -256,14 +260,21 @@ async function runMultistepLoop(
 			return { result: { stoppedReason: 'done', stepsSoFar: state.stepsSoFar, totalActionsRun: state.totalActionsRun }, nextContinuationMessage: message };
 		}
 
-		// No actions: nudge once on the very first step, otherwise treat as finished.
+		// No actions and no <done/>: the model is idling on prose. Nudge once to
+		// force it to either keep working or explicitly finish, then bail. This
+		// catches the failure mode where the model runs read_file / list_dir and
+		// then writes "let me know what you'd like next" — instead of stopping
+		// silently we tell it to keep going. The check fires on every iteration
+		// (not just iteration 0) because the failure can happen mid-task too.
 		if (actions.length === 0) {
-			if (loop === 0 && stepsAtStart === 0 && textWithoutActions.length > 30) {
-				message = 'You described what to do but did not use <actions> blocks. You MUST output <actions> to perform the task. When the task is fully done, emit a <done/> tag instead of more actions. Do it now.';
+			consecutiveNoActions++;
+			if (consecutiveNoActions <= MAX_NO_ACTION_NUDGES) {
+				message = `You returned no <actions> and no <done/>. The user's request from <user_request> is NOT complete unless you have emitted <done/>. Do NOT ask the user "what next?" — they already told you what to do. Pick the next concrete step and emit it as <actions> RIGHT NOW. If you genuinely believe the original request is fully implemented and verified, emit <done/> instead. No other response is acceptable.`;
 				continue;
 			}
 			return { result: { stoppedReason: 'no-actions', stepsSoFar: state.stepsSoFar, totalActionsRun: state.totalActionsRun }, nextContinuationMessage: message };
 		}
+		consecutiveNoActions = 0;
 
 		// Loop detection across the whole task (survives resume).
 		let repeatedAction: string | undefined;
@@ -290,7 +301,7 @@ async function runMultistepLoop(
 			stream.progress(`Step ${stepDisplay} — ${action.type}…`);
 			let result: ToolResult;
 			try {
-				result = await executeAction(action, stream);
+				result = await executeAction(action, stream, token);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				result = { tool: action.type, success: false, output: `Unhandled error: ${msg}` };
