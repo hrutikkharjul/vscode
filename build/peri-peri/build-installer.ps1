@@ -35,7 +35,7 @@ Set-Location $RepoRoot
 
 # Allow running with the Node version we have on this box (22.13.1) instead
 # of the strict version pinned in .nvmrc (22.22.1). The actual API surface
-# is compatible — preinstall just enforces the floor.
+# is compatible - preinstall just enforces the floor.
 $env:VSCODE_SKIP_NODE_VERSION_CHECK = '1'
 
 function Step($msg) {
@@ -86,7 +86,7 @@ if (-not $SkipInstall) {
 
 # ---------- 3. compile core ----------
 if (-not $SkipCompile) {
-    Step "3. Compile core  (npm run gulp core-ci) — 10-30 min"
+    Step "3. Compile core  (npm run gulp core-ci) - 10-30 min"
     Run "npm run gulp core-ci"
 } else {
     Write-Host "Skipping compile (-SkipCompile)" -ForegroundColor DarkGray
@@ -110,8 +110,9 @@ Step "Done. Output dir:"
 Write-Host $out
 if (Test-Path $out) {
     Get-ChildItem $out -Filter *.exe | ForEach-Object {
-        Write-Host ("  " + $_.FullName + "  ({0:N0} bytes)" -f $_.Length) -ForegroundColor Green
+        $outputLine = '  {0}  ({1:N0} bytes)' -f $_.FullName, $_.Length
+        Write-Host $outputLine -ForegroundColor Green
     }
 } else {
-    Write-Host "(output directory not found — inspect log above for errors)" -ForegroundColor Red
+    Write-Host "(output directory not found - inspect log above for errors)" -ForegroundColor Red
 }

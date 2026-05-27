@@ -26,6 +26,7 @@ import { IFeedbackReporter } from '../../prompt/node/feedbackReporter';
 import { IPromptCategorizerService } from '../../prompt/node/promptCategorizer';
 import { ChatSummarizerProvider } from '../../prompt/node/summarizer';
 import { ChatTitleProvider } from '../../prompt/node/title';
+import { selectCopilotUtilityLanguageModel } from './languageModelSelectors';
 import { IUserFeedbackService } from './userActions';
 import { getAdditionalWelcomeMessage } from './welcomeMessageProvider';
 
@@ -285,7 +286,7 @@ Learn more about [GitHub Copilot](https://docs.github.com/copilot/using-github-c
 			return request;
 		}
 		const baseEndpoint = await this.endpointProvider.getChatEndpoint('copilot-utility');
-		const baseLmModel = (await vscode.lm.selectChatModels({ id: baseEndpoint.model, family: baseEndpoint.family, vendor: 'copilot' }))[0];
+		const baseLmModel = await selectCopilotUtilityLanguageModel();
 		if (!baseLmModel) {
 			return request;
 		}
